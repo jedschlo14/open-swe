@@ -51,6 +51,7 @@ DEFAULT_THREAD_TITLE_REASONING_EFFORT = "low"
 REVIEW_SCOUT_FALLBACK_MODEL = ("openai:gpt-6.1-sol", "medium")
 ANTHROPIC_THREAD_TITLE_MODEL = "anthropic:claude-opus-5-5"
 ANTHROPIC_THREAD_TITLE_REASONING_EFFORT = "low"
+DEFAULT_BROWSER_IDLE_TIMEOUT_MINUTES = 60
 
 
 class WorkspaceSettingsUpdate(BaseModel):
@@ -86,6 +87,7 @@ class WorkspaceSettingsUpdate(BaseModel):
         default=None, json_schema_extra={"agent_feature_flag": True}
     )
     org_guidelines: str | None = None
+    browser_idle_timeout_minutes: int | None = Field(default=None, ge=5, le=480)
     default_agent_model: str | None = None
     default_agent_reasoning_effort: str | None = None
     default_agent_subagent_model: str | None = None
@@ -323,6 +325,7 @@ def _default_settings() -> dict[str, Any]:
         "expedited_review_enabled": False,
         "sandbox_openai_enabled": False,
         "org_guidelines": None,
+        "browser_idle_timeout_minutes": DEFAULT_BROWSER_IDLE_TIMEOUT_MINUTES,
         "default_agent_model": fallback_model,
         "default_agent_reasoning_effort": fallback_effort,
         "default_agent_subagent_model": fallback_model,
@@ -689,6 +692,14 @@ class WorkspaceSettings(Mapping[str, Any]):
     def sandbox_openai_enabled(self) -> bool:
         """Whether sandbox clients may use the experimental Responses API."""
         return self.get("sandbox_openai_enabled") is True
+
+    @property
+    def browser_idle_timeout_minutes(self) -> int:
+        """How long a thread's browser may sit unused before it is stopped."""
+        value = self.get("browser_idle_timeout_minutes")
+        if isinstance(value, int) and not isinstance(value, bool) and 5 <= value <= 480:
+            return value
+        return DEFAULT_BROWSER_IDLE_TIMEOUT_MINUTES
 
     @property
     def org_review_guidelines(self) -> str | None:

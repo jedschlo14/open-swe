@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import HTTPException
 from langgraph_sdk.errors import NotFoundError
 
+from agent.browser.manager import stop_browser_for_thread
 from agent.dashboard.options import normalize_model_choice
 from agent.github.pull_request_checks import PullRequestState, get_pull_request_check_states
 from agent.github.pull_request_context import PullRequestFixScope, get_pull_request_context
@@ -464,6 +465,7 @@ async def delete_dashboard_thread(thread_id: str, login: str, *, email: str | No
             logger.debug("Could not cancel run %s for thread %s", run_id, thread_id, exc_info=True)
 
     await client.threads.delete(thread_id)
+    await stop_browser_for_thread(thread_id, "thread_closed")
     # The mirrored transcript outlives the LangGraph thread otherwise, and the
     # read path authorizes against the mirror rather than against LangGraph.
     try:
@@ -652,6 +654,9 @@ async def resolve_all_dashboard_threads(login: str, *, email: str | None = None)
             )
 
     await asyncio.gather(*(resolve(thread["thread_id"]) for thread in threads))
+    await asyncio.gather(
+        *(stop_browser_for_thread(thread["thread_id"], "thread_closed") for thread in threads)
+    )
     return len(threads)
 
 
@@ -682,6 +687,8 @@ async def resolve_dashboard_thread(
     except Exception as exc:  # noqa: BLE001
         logger.debug("Could not update resolved state for thread %s", thread_id, exc_info=True)
         raise HTTPException(502, "failed to update thread") from exc
+    if resolved:
+        await stop_browser_for_thread(thread_id, "thread_closed")
     thread = {**as_thread_dict(thread), "metadata": {**metadata, **metadata_update}}
     return await _thread_summary(thread)
 
