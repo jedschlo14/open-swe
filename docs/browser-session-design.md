@@ -29,22 +29,22 @@ The Browser tab lives in the dashboard's right panel alongside Terminal, Changes
 
 ### Observe, take over, hand back
 
-Watching is passive. When the agent has control and the session is ready, an authorized participant clicks **Take over** in the Browser tab. The system settles or safely cancels the in-flight browser action, then grants that participant the exclusive input lease; agent actions against the browser wait or return a recoverable conflict. Unrelated coding can continue. Show who currently controls the browser.
+Watching is passive. When the agent has control and the session is ready, an authorized participant clicks **Take over** in the Browser tab. The request blocks dispatch of new agent browser actions; control transfers only after in-flight work has settled or been safely cancelled. Until then, report takeover as pending, not complete. Agent browser actions wait or return a recoverable conflict; whether unrelated coding can continue depends on run orchestration and must be validated in the spike. Show who currently controls the browser.
 
-The participant clicks **Hand back to agent** to release the lease. The agent re-reads the current page before resuming; stale queued actions must not replay. Other authorized participants may watch, but stale/disconnected viewers cannot send input. Define a visible lease-expiration and recovery policy: disconnect must not silently return control or block indefinitely.
+The participant clicks **Hand back to agent** to release the lease. Revoke participant input, have the agent re-read the current page before resuming, and discard stale queued actions. Other authorized participants may watch, but stale/disconnected viewers cannot send input. Session stop or failure revokes browser control. A controller disconnect does not silently transfer control; define a visible lease-expiration and recovery policy before MVP so a lost connection cannot block control indefinitely.
 
 ### Minimal state model
 
-Keep lifecycle, control, viewer connection, and agent progress independent:
+Keep lifecycle, browser control, viewer connection, and agent progress as separate but coordinated state. This avoids enumerating every possible combination while making the key transition rules explicit:
 
 | Concern | States / source of truth |
 |---|---|
-| Session lifecycle | `absent → starting → ready → stopping → absent`. `starting` or `ready` may transition to `failed`; retry returns to `starting`. Ended sessions are history, not active state. |
-| Browser control | `agent → takeover_pending → participant → agent`; one controller at a time. Takeover is pending while in-flight actions settle; the participant's **Hand back to agent** action releases the lease. A ready session is required for participant control. |
-| View connection | Per-viewer `connected`/`disconnected` and freshness; does not determine session lifecycle or control. |
-| Agent progress | Existing run/tool state; derive waiting from a blocked browser action and represent help requests separately. |
+| Session lifecycle | `not_started → starting → ready → stopping → stopped`; startup or runtime failure transitions to `failed`, and retry starts a new attempt at `starting`. `stopped` and `failed` are terminal for that attempt; history is separate from whether a session is active. |
+| Browser control | Controller is `agent`, one authorized `participant`, or `none`; handoff phase is `idle`, `takeover_pending`, or `handback_pending`. Only one controller may hold the input lease. During takeover, the agent remains the lease owner but cannot dispatch new actions while in-flight work settles; the participant receives the lease only when takeover completes. During handback, the participant retains the lease until release is accepted; the agent resumes only after refreshing page context. |
+| Viewer connection | Per-viewer `connected`/`disconnected` and freshness. This does not determine session lifecycle or transfer control. |
+| Agent progress | Existing run/tool state is the source of truth. Browser actions may be blocked during participant control; behavior of unrelated work during that interval must be validated rather than assumed. |
 
-The dashboard shows lifecycle, current controller, viewer freshness, pending takeover, and available actions. A disconnected controller retains the lease until the stated recovery policy applies; a viewer disconnect never transfers control by itself. Preserve page state across agent turns and handoff within the thread; define idle cleanup and restart behavior. Never carry cookies between threads.
+Invariants: a session that is not ready cannot grant participant control; stopping or failure revokes the control lease; viewer disconnect alone never transfers control; and no old or queued browser action may execute after control changes. If an in-flight action cannot be confirmed settled or cancelled, do not report takeover as complete. The dashboard shows lifecycle, current controller, viewer freshness, handoff phase, and available actions. Preserve page state across agent turns and handoff within the thread; define idle cleanup and restart behavior. Never carry cookies between threads.
 
 ## Browser interaction and diagnostics
 
