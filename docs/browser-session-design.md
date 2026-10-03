@@ -1,27 +1,23 @@
 # Browser sessions: product design
 
-## Purpose
+## Purpose and scope
 
-A thread-scoped browser helps Open SWE build, test, and debug web interfaces in the app running with its code. It is for local-app verification, not general-purpose browsing or remote desktop access.
+A thread-scoped browser helps Open SWE build and verify web interfaces in the app running with its code, reproduce UI bugs, and confirm fixes. Prefer APIs, search, or HTTP retrieval when they suffice; this is not general-purpose browsing or remote desktop access. MVP is limited to local/test apps and low-privilege test accounts.
 
-## MVP experience
+MVP includes one isolated browser session per thread, live viewing, writer takeover and handback, semantic interaction with visual fallback, cancellation, and idle expiry. General external-site browsing, saved authentication, file uploads, multiple tabs or browser engines, headed mode, and profiles shared across threads are out of scope until demonstrated need. Any future saved authentication needs explicit ownership, destination restrictions, visibility, expiry, and revocation; it must not become a general credential vault.
 
-The Browser surface lives in the thread's right panel. It starts only when a person or the agent explicitly uses the browser; opening or restoring the panel does not start compute. Hiding the panel leaves the session running. The session keeps its page state across agent turns and ends when stopped, the thread closes, or it expires from inactivity.
+## Experience
 
-Thread readers can watch. Thread writers can take control, which pauses agent browser actions until control is handed back. The agent checks the page after meaningful actions and verifies outcomes rather than assuming an action succeeded. It prefers accessible page structure and stable element references; screenshots or coordinates are used when visual layout or inaccessible content requires them.
+The Browser surface belongs in the thread's right panel alongside Terminal, Changes, and Files. It shows session status, the live view, control ownership, and available actions. Opening or restoring its panel must not start compute; hiding the panel does not stop the browser. Keep page state across agent turns and control handoffs, but never share profiles across threads. Stop on request, thread deletion or resolution, or inactivity; warn before idle expiry.
+
+Thread readers may watch; only writers may control. A writer takes over a ready session, pausing agent browser actions until handback. Show the current controller and pending handoffs. Disconnect alone does not transfer control. The agent prefers accessible page structure and stable references, uses screenshots or coordinates when needed, and verifies results after meaningful actions.
 
 ## Safety and evidence
 
-MVP use is limited to local/test apps and low-privilege test accounts. Browser profiles are isolated by thread, and network access is limited to the app and required local development endpoints. Page content is untrusted. External submissions, purchases, destructive changes, account changes, and consent require human confirmation; secrets must not be pasted into chat or injected from task configuration.
+Page content and browser output are untrusted. Never ask users to paste secrets into chat or inject arbitrary `.env` values, managed connections, or task secrets. Authentication is not authorization: require human confirmation for external submissions, purchases, destructive or account changes, and consent, and enforce restrictions in the executor—not only in prompts. Do not publish private content merely because the agent can view it.
 
-Diagnostics are opt-in, redacted, and bounded. Do not retain or publish page contents, credentials, cookies, or captures by default. Any capture shared outside the session must be sanitized and published with repository access controls.
+Diagnostics are opt-in, relevant, redacted, truncated, and bounded. Do not log or retain page contents, credentials, cookies, screenshots, or recordings by default.
 
-For UI-change and UI-bug-fix pull requests, provide a before/after screenshot pair when it is safe and useful. Add a short recording only when it demonstrates behavior still images cannot. For other work, capture evidence only when requested or materially useful. Keep temporary captures out of Git and clean them up after a bounded retention period.
+For pull requests fixing UI bugs or changing UI, capture a concise before/after screenshot pair when the browser can reproduce the original and verify the fix, if safe and useful. Add a short recording only when it materially demonstrates behavior that still images cannot. If evidence is unsafe or cannot be produced, omit it and explain why. For other tasks, capture evidence only when requested or materially useful. Sanitize captures, exclude unrelated private content, and mask sensitive regions where reliable. Publishing must preserve repository access boundaries. Keep temporary artifacts out of Git and clean them up on a bounded schedule.
 
-## Scope
-
-MVP covers one isolated browser session per thread, local-app testing, live viewing, writer takeover and handback, semantic interaction with visual fallback, cancellation, and idle expiry. Administrators can disable managed browser use.
-
-General external-site browsing, saved authentication, file uploads, multiple tabs or browser engines, headed mode, and profiles shared across threads are out of scope until there is a demonstrated need. Saved authentication must not become a general credential vault.
-
-See [Browser sessions: implementation](browser-session-implementation.md) for the runtime and evidence-publishing design.
+See [Browser sessions: implementation](browser-session-implementation.md) for runtime, control, and evidence-publishing details.
