@@ -3,14 +3,36 @@
 from datetime import datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 SessionState = Literal["starting", "ready", "stopping", "stopped", "failed"]
 ACTIVE_STATES: tuple[SessionState, ...] = ("starting", "ready", "stopping")
-FailureReason = Literal["sandbox_lost", "sandbox_unsupported", "engine_missing", "launch_failed"]
+FailureReason = Literal[
+    "sandbox_lost", "sandbox_unsupported", "engine_missing", "egress_unavailable", "launch_failed"
+]
 StopReason = Literal["requested", "thread_closed", "idle_timeout", "sandbox_recreated"]
+Controller = Literal["agent", "user"]
 
 IDLE_WARNING_LEAD = timedelta(minutes=5)
+
+
+class PageRef(BaseModel):
+    """An element the last snapshot named, as the confirmation gate sees it."""
+
+    role: str
+    name: str
+
+
+class PendingConfirmation(BaseModel):
+    """A sensitive action held until a thread writer approves exactly this operation."""
+
+    confirmation_id: str
+    operation: dict[str, JsonValue]
+    reason: str
+    description: str
+    status: Literal["pending", "approved"]
+    requested_at: datetime
+    decided_by: str | None = None
 
 
 class BrowserSession(BaseModel):
@@ -30,6 +52,13 @@ class BrowserSession(BaseModel):
     last_activity_at: datetime
     warned_at: datetime | None
     ended_at: datetime | None
+    controller: Controller
+    controller_login: str | None
+    lease_epoch: int
+    approved_endpoints: list[str]
+    allowed_endpoints: list[str]
+    page_refs: dict[str, PageRef] | None
+    pending_confirmation: PendingConfirmation | None
 
     @property
     def active(self) -> bool:
@@ -42,6 +71,11 @@ class BrowserSession(BaseModel):
     @property
     def daemon_session(self) -> str:
         """The ``agent-browser`` session name, unique per session so profiles never mix."""
+        return f"osw-{self.session_id}"
+
+    @property
+    def network_namespace(self) -> str:
+        """The network namespace the browser runs in; its only way out is the egress proxy."""
         return f"osw-{self.session_id}"
 
 
@@ -57,6 +91,8 @@ class BrowserSessionView(BaseModel):
     expires_at: datetime | None = None
     expiry_warning: bool = False
     supported: bool = True
+    controller: Controller | None = None
+    pending_confirmation: PendingConfirmation | None = None
 
     @classmethod
     def of(
@@ -75,4 +111,6 @@ class BrowserSessionView(BaseModel):
             expires_at=expires_at,
             expiry_warning=expires_at is not None and now >= expires_at - IDLE_WARNING_LEAD,
             supported=supported,
+            controller=session.controller if session.active else None,
+            pending_confirmation=session.pending_confirmation if session.active else None,
         )

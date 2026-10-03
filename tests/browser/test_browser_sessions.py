@@ -13,10 +13,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from pydantic import JsonValue
 from sqlalchemy import text
 
-from agent.browser import engine, manager, routes, store
+from agent.browser import broker, engine, manager, routes, store
 from agent.browser.models import BrowserSession
+from agent.browser.ops import ClickOp, NavigateOp, SnapshotOp
 from agent.database import postgres
 
 THREAD = "thread-1"
@@ -26,6 +28,7 @@ class FakeEngine:
     def __init__(self) -> None:
         self.launches = 0
         self.closes = 0
+        self.commands: list[list[str]] = []
 
     @asynccontextmanager
     async def connected(self, sandbox_id: str) -> AsyncIterator[str]:
@@ -38,6 +41,21 @@ class FakeEngine:
 
     async def close(self, sandbox: str, session: BrowserSession) -> None:
         self.closes += 1
+
+    async def run_command(
+        self, sandbox: str, session: BrowserSession, args: list[str]
+    ) -> dict[str, JsonValue]:
+        self.commands.append(args)
+        if args[0] == "get":
+            return {"url": "http://localhost:3000/settings"}
+        if args[0] == "snapshot":
+            return {"refs": {"e1": {"role": "button", "name": "Delete account"}}}
+        return {}
+
+    async def write_allowlist(
+        self, sandbox: str, session: BrowserSession, endpoints: list[str]
+    ) -> None:
+        return None
 
 
 @dataclass
@@ -52,7 +70,7 @@ def sandbox(monkeypatch: pytest.MonkeyPatch, registry_db: None) -> Sandbox:
     fake = FakeEngine()
     monkeypatch.setenv("SANDBOX_TYPE", "langsmith")
     monkeypatch.setattr(manager, "get_sandbox_metadata", AsyncMock(side_effect=lambda _: bound))
-    monkeypatch.setattr(manager, "_idle_timeout_seconds", AsyncMock(return_value=3600))
+    monkeypatch.setattr(manager, "_session_settings", AsyncMock(return_value=(3600, [])))
     monkeypatch.setattr(manager, "_thread_closed", AsyncMock(return_value=False))
     monkeypatch.setattr(manager, "_START_POLL_SECONDS", 0.02)
     monkeypatch.setattr(manager.cron, "ensure_sweep_cron", AsyncMock(return_value="cron-1"))
@@ -63,6 +81,8 @@ def sandbox(monkeypatch: pytest.MonkeyPatch, registry_db: None) -> Sandbox:
     monkeypatch.setattr(engine, "connected", fake.connected)
     monkeypatch.setattr(engine, "launch", fake.launch)
     monkeypatch.setattr(engine, "close", fake.close)
+    monkeypatch.setattr(engine, "run_command", fake.run_command)
+    monkeypatch.setattr(engine, "write_allowlist", fake.write_allowlist)
     return Sandbox(metadata=bound, engine=fake)
 
 
@@ -109,6 +129,54 @@ async def test_an_idle_session_is_stopped_by_the_sweep(sandbox: Sandbox) -> None
     assert ended is not None
     assert (ended.state, ended.stop_reason) == ("stopped", "idle_timeout")
     assert sandbox.engine.closes == 1
+
+
+async def test_a_sensitive_click_waits_for_one_approval_from_a_thread_writer(
+    sandbox: Sandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await broker.execute(THREAD, NavigateOp(url="http://localhost:3000/"), workspace_slug=None)
+    await broker.execute(THREAD, SnapshotOp(), workspace_slug=None)
+    click = ClickOp(ref="e1")
+
+    held = await broker.execute(THREAD, click, workspace_slug=None)
+    assert held.status == "confirmation_required"
+    assert held.confirmation_id is not None
+    unapproved = await broker.execute(
+        THREAD, click, workspace_slug=None, confirmation_id=held.confirmation_id
+    )
+    assert unapproved.status == "confirmation_required"
+    assert ["click", "@e1"] not in sandbox.engine.commands
+
+    pending = await store.active(THREAD)
+    assert pending is not None and pending.pending_confirmation is not None
+    thread = {"metadata": {"source": "dashboard", "visibility": "public", "owner_login": "alice"}}
+    client = SimpleNamespace(threads=SimpleNamespace(get=AsyncMock(return_value=thread)))
+    monkeypatch.setattr(routes, "langgraph_client", lambda: client)
+    await routes.api_browser_confirm(
+        THREAD,
+        pending.pending_confirmation.confirmation_id,
+        routes.ConfirmationDecision(approve=True),
+        {"sub": "alice", "email": None},
+    )
+    confirmation_id = pending.pending_confirmation.confirmation_id
+
+    done = await broker.execute(THREAD, click, workspace_slug=None, confirmation_id=confirmation_id)
+    again = await broker.execute(
+        THREAD, click, workspace_slug=None, confirmation_id=confirmation_id
+    )
+
+    assert done.status == "ok"
+    assert again.status == "confirmation_required"
+    assert sandbox.engine.commands.count(["click", "@e1"]) == 1
+
+
+async def test_navigation_outside_the_sandbox_is_refused(sandbox: Sandbox) -> None:
+    refused = await broker.execute(
+        THREAD, NavigateOp(url="https://example.com/"), workspace_slug=None
+    )
+
+    assert refused.status == "refused"
+    assert not any(args[0] == "open" for args in sandbox.engine.commands)
 
 
 async def test_an_admin_can_watch_a_private_thread_but_not_start_its_browser(

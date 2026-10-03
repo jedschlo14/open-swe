@@ -243,6 +243,7 @@ from agent.tools.admin_gate import (
     actor_has_admin_context,
     participant_is_admin,
 )
+from agent.tools.browser import browser_tools
 from agent.tools.manage_feature_flags import manage_feature_flags
 from agent.tools.manage_review_approval_mode import manage_review_approval_mode
 from agent.tools.submit_review_assessment_feedback import submit_review_assessment_feedback
@@ -1813,6 +1814,11 @@ async def build_agent(config: RunnableConfig, *, tool_surface: ToolSurface | Non
     integration_tool_groups: dict[str, IntegrationGroup | Sequence[Any]] = {
         "MCPs": mcp_tools,
         "Notion": notion_tools,
+        "Browser": (
+            browser_tools()
+            if sandbox_file_downloads and not local_run and not cli_result_required
+            else []
+        ),
     }
     if integration_tool_groups:
         candidate = DynamicToolMiddleware(

@@ -1,16 +1,17 @@
 """Dashboard API for a thread's browser session.
 
-Reading the session's status needs thread-read access; starting, stopping, and
-keeping it alive need thread-write access, checked on every request.
+Reading the session's status needs thread-read access; starting, stopping,
+keeping it alive, and confirming a held action need thread-write access, checked
+on every request.
 """
 
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import JsonValue
+from pydantic import BaseModel, JsonValue
 
-from agent.browser import manager
+from agent.browser import manager, store
 from agent.browser.models import BrowserSession, BrowserSessionView
 from agent.dashboard.deps import SESSION_DEP
 from agent.threads.summary import assert_thread_readable, thread_is_postable
@@ -18,6 +19,10 @@ from agent.utils.json_types import thread_metadata
 from agent.utils.thread_ops import langgraph_client
 
 router = APIRouter(tags=["browser"])
+
+
+class ConfirmationDecision(BaseModel):
+    approve: bool
 
 
 async def _metadata(thread_id: str) -> dict[str, JsonValue]:
@@ -90,3 +95,23 @@ async def api_browser_keepalive(
     metadata = await _writable(thread_id, session)
     kept = await manager.keep_alive(thread_id)
     return _view(kept or await manager.current(thread_id), metadata)
+
+
+@router.post("/threads/{thread_id}/browser/confirmations/{confirmation_id}")
+async def api_browser_confirm(
+    thread_id: str,
+    confirmation_id: str,
+    decision: ConfirmationDecision,
+    session: dict[str, Any] = SESSION_DEP,
+) -> BrowserSessionView:
+    """Approve or deny the action the agent is waiting on; only a thread writer may decide."""
+    metadata = await _writable(thread_id, session)
+    active = await store.active(thread_id)
+    if active is None:
+        raise HTTPException(409, "no browser session is running")
+    decided = await store.decide_confirmation(
+        active.session_id, confirmation_id, approve=decision.approve, login=session["sub"]
+    )
+    if decided is None:
+        raise HTTPException(409, "that action is no longer waiting for confirmation")
+    return _view(decided, metadata)
