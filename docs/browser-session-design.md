@@ -30,6 +30,8 @@ Saved authentication across threads is worth exploring separately. It does not r
 
 ## Product behavior
 
+The browser lives in the dashboard's right panel, alongside Terminal, Changes, and Files. Its Browser tab contains the live view, session status, and takeover/handback controls.
+
 ### Startup and controls
 
 - Managed browser support is available by default, subject to administrator policy. The first browser action starts or connects to the thread's session; later actions reuse it. Opening a thread or panel does not launch a browser.
