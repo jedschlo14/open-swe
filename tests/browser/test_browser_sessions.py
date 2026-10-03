@@ -6,7 +6,7 @@ conditional updates, so these run against PostgreSQL rather than a double.
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from pydantic import JsonValue
 from sqlalchemy import text
 
-from agent.browser import broker, engine, live, manager, routes, store
+from agent.browser import broker, engine, lease, live, manager, routes, store
 from agent.browser.models import BrowserSession
 from agent.browser.ops import ClickOp, NavigateOp, SnapshotOp
 from agent.database import postgres
@@ -30,6 +30,7 @@ class FakeEngine:
         self.launches = 0
         self.closes = 0
         self.commands: list[list[str]] = []
+        self.on_command: Callable[[list[str]], Awaitable[None]] | None = None
 
     @asynccontextmanager
     async def connected(self, sandbox_id: str) -> AsyncIterator[str]:
@@ -47,8 +48,10 @@ class FakeEngine:
         self, sandbox: str, session: BrowserSession, args: list[str]
     ) -> dict[str, JsonValue]:
         self.commands.append(args)
+        if self.on_command is not None:
+            await self.on_command(args)
         if args[0] == "get":
-            return {"url": "http://localhost:3000/settings"}
+            return {"url": "http://localhost:3000/settings", "title": "Settings"}
         if args[0] == "snapshot":
             return {"refs": {"e1": {"role": "button", "name": "Delete account"}}}
         return {}
@@ -206,3 +209,52 @@ def test_a_view_only_viewer_cannot_send_input_to_the_browser() -> None:
 
     assert live._viewer_message(json.dumps(click)) is None
     assert live._viewer_message(json.dumps({"type": "ack", "seq": 7})) == {"type": "ack", "seq": 7}
+
+
+async def test_a_takeover_fences_out_the_agent_until_the_person_hands_back(
+    sandbox: Sandbox,
+) -> None:
+    await broker.execute(THREAD, NavigateOp(url="http://localhost:3000/"), workspace_slug=None)
+    await broker.execute(THREAD, SnapshotOp(), workspace_slug=None)
+    taken = await lease.take_control(THREAD, "alice")
+    gate = live._ControlGate(taken, "alice", AsyncMock(return_value="control"))
+
+    blocked = await broker.execute(THREAD, ClickOp(ref="e1"), workspace_slug=None)
+    assert blocked.status == "user_in_control"
+    assert await gate.allows(True)
+
+    await lease.hand_back(THREAD, "alice")
+    stale = await broker.execute(THREAD, ClickOp(ref="e1"), workspace_slug=None)
+
+    assert not await gate.allows(True)
+    assert stale.status == "refused"
+    assert stale.handback is not None
+    assert (stale.handback.returned_by, stale.handback.url) == (
+        "alice",
+        "http://localhost:3000/settings",
+    )
+    assert ["click", "@e1"] not in sandbox.engine.commands
+
+
+async def test_an_agent_action_interrupted_by_a_takeover_is_discarded(
+    sandbox: Sandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = await broker.execute(
+        THREAD, NavigateOp(url="http://localhost:3000/"), workspace_slug=None
+    )
+    assert started.status == "ok"
+    monkeypatch.setattr(engine, "element_label", AsyncMock(return_value="Docs"))
+    session = await store.active(THREAD)
+    assert session is not None
+
+    async def take_over_on_first_move(args: list[str]) -> None:
+        if args[:2] == ["mouse", "move"]:
+            await store.begin_takeover(session.session_id, "alice")
+
+    sandbox.engine.on_command = take_over_on_first_move
+    interrupted = await broker.execute(THREAD, ClickOp(x=10, y=10), workspace_slug=None)
+
+    assert interrupted.status == "user_in_control"
+    assert ["mouse", "down"] not in sandbox.engine.commands
+    settled = await store.active(THREAD)
+    assert settled is not None and settled.agent_inflight == 0
