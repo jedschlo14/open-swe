@@ -29,9 +29,9 @@ The Browser tab lives in the dashboard's right panel alongside Terminal, Changes
 
 ### Observe, take over, hand back
 
-Watching is passive. When the agent has control and the session is ready, an authorized participant clicks **Take over** in the Browser tab. The request blocks dispatch of new agent browser actions; control transfers only after in-flight work has settled or been safely cancelled. Until then, report takeover as pending, not complete. Agent browser actions wait or return a recoverable conflict; whether unrelated coding can continue depends on run orchestration and must be validated in the spike. Show who currently controls the browser.
+Watching is passive. Browser permissions follow the thread's existing access policy: anyone permitted to read the thread may view its browser, and only someone permitted to post to the thread may take over. For example, a workspace admin who can read a private thread may watch its browser but cannot control it unless they also have write access. Do not grant browser access to people who could not otherwise read or post to that thread. When the agent has control and the session is ready, an authorized writer clicks **Take over** in the Browser tab. The request blocks dispatch of new agent browser actions; control transfers only after in-flight work has settled or been safely cancelled. Until then, report takeover as pending, not complete. Agent browser actions wait or return a recoverable conflict; whether unrelated coding can continue depends on run orchestration and must be validated in the spike. Show who currently controls the browser.
 
-The participant clicks **Hand back to agent** to release the lease. Revoke participant input, have the agent re-read the current page before resuming, and discard stale queued actions. Other authorized participants may watch, but stale/disconnected viewers cannot send input. Session stop or failure revokes browser control. A controller disconnect does not silently transfer control; define a visible lease-expiration and recovery policy before MVP so a lost connection cannot block control indefinitely.
+The participant clicks **Hand back to agent** to release the lease. Revoke participant input, have the agent re-read the current page before resuming, and discard stale queued actions. Other authorized viewers may watch, but stale/disconnected viewers cannot send input. Session stop or failure revokes browser control. A controller disconnect does not silently transfer control; define a visible lease-expiration and recovery policy before MVP so a lost connection cannot block control indefinitely.
 
 ### Minimal state model
 
@@ -44,7 +44,7 @@ Keep lifecycle, browser control, viewer connection, and agent progress as separa
 | Viewer connection | Per-viewer `connected`/`disconnected` and freshness. This does not determine session lifecycle or transfer control. |
 | Agent progress | Existing run/tool state is the source of truth. Browser actions may be blocked during participant control; behavior of unrelated work during that interval must be validated rather than assumed. |
 
-Invariants: a session that is not ready cannot grant participant control; stopping or failure revokes the control lease; viewer disconnect alone never transfers control; and no old or queued browser action may execute after control changes. If an in-flight action cannot be confirmed settled or cancelled, do not report takeover as complete. The dashboard shows lifecycle, current controller, viewer freshness, handoff phase, and available actions. Preserve page state across agent turns and handoff within the thread; define idle cleanup and restart behavior. Never carry cookies between threads.
+Invariants: a session that is not ready cannot grant participant control; stopping or failure revokes the control lease; viewer disconnect alone never transfers control; and no old or queued browser action may execute after control changes. If an in-flight action cannot be confirmed settled or cancelled, do not report takeover as complete. The dashboard shows lifecycle, current controller, viewer freshness, handoff phase, and available actions. Preserve page state across prompts, agent turns, and handoffs within the thread; do not stop the session just because a run ended. Stop it on explicit user request, thread deletion or resolution, or inactivity. Start with a one-hour idle timeout as a provisional MVP default, show a visible warning before expiry, and allow activity to keep the session alive; validate the timeout against runtime cost and user workflow in the spike. After expiry, restart cleanly rather than silently restoring authentication. Never carry cookies or profiles between threads.
 
 ## Browser interaction and diagnostics
 
@@ -62,9 +62,9 @@ Any future saved-auth feature needs explicit owner, allowed destinations, partic
 
 ## Evidence
 
-Capture screenshots only when browser verification materially explains a UI change or when requested. Prefer a small before/after pair when a meaningful baseline exists; use on-demand intermediate captures. Do not automatically attach evidence for general browsing, investigations, or explanations. Recordings are deferred; if added, make them explicit, short, and bounded.
+When a user asks Open SWE to fix a UI bug or make a UI change, capture and attach a concise before/after screenshot pair to the resulting PR when the browser can reproduce the before state and verify the after state. Treat this as expected MVP behavior, not a manual-only option. If a safe or meaningful before/after comparison is unavailable, omit the pair and explain why. For other tasks, capture screenshots only when they materially aid browser verification or are requested; do not attach evidence automatically for general browsing, investigations, or explanations. Intermediate captures are on demand. Recordings are deferred; if added, make them explicit, short, and bounded.
 
-Avoid login and authentication screens, exclude unrelated private content, and mask sensitive regions where reliable. Omit evidence when safety is uncertain. Publishing to a PR is a separate authorization decision from viewing; validate artifact access and retention for public and private repositories before enabling attachments. Keep evidence out of source control and clean up temporary captures/downloads on a bounded schedule.
+Avoid login and authentication screens, exclude unrelated private content, and mask sensitive regions where reliable. Omit evidence when safety is uncertain. Publishing screenshots to a PR is a separate authorization decision from viewing them: validate that publication preserves public/private repository access boundaries and define bounded artifact retention before enabling attachments. Keep evidence out of source control and clean up temporary captures/downloads on a bounded schedule.
 
 ## Runtime and architecture
 
@@ -78,26 +78,27 @@ Use one isolated headless Chromium session per thread with a primary page. The d
 
 ## Security and failure requirements
 
-- Authorize every session, view, and control request; thread visibility alone need not grant browser control.
-- Isolate profiles and temporary data per thread. Enforce network egress policy outside the browser; allow the intended local dev app while blocking loopback/private/link-local destinations reached through external navigation, redirects, or DNS changes. Validate this in the spike.
+- Authorize every session, view, and control request using the thread's existing read/write policy: thread readers may watch; thread writers may control. Do not grant access to anyone who lacks the corresponding thread permission.
+- Isolate profiles and temporary data per thread. MVP browser networking is limited to the explicitly authorized local test app and required local development endpoints; general internet and other local/private/link-local destinations are blocked. Enforce this outside the browser and validate redirects, DNS changes, and alternate access paths in the spike.
 - Treat all page-provided text, titles, URLs, screenshots, diagnostics, downloads, and tool results as untrusted. Prompt-injection detection may be evaluated as defense in depth, never as a substitute for isolation or authorization.
 - Administrator disable blocks managed provisioning, tool exposure, streaming, and control endpoints. Do not claim it blocks standalone browser binaries through shell access unless separately enforced.
 - Mark stale views and disable their input; distinguish stream loss from runtime failure. Log operational metadata only.
 
 ## Rollout and open decisions
 
-1. **Spike:** prove same-session observation/takeover/handback, CLI arbitration, stale-action handling, reconnects, local-app access, egress enforcement, semantic interaction, opt-in diagnostics, cancellation, and cleanup.
-2. **Before MVP:** settle participant permissions, low-privilege test credential handling, egress rules, lease recovery, event-history retention, and safe artifact hosting. Do not enable PR attachments until publication permissions and retention work for public/private repos.
-3. **MVP:** on-demand local-app testing, live view, takeover/handback, semantic interactions with visual fallback, cancellation, and opt-in diagnostics. Capture minimal screenshots when they explain a UI change.
-4. **Expand:** evaluate external browsing, saved authentication, file handling, recordings, configurable run quotas, and broader browser support only from demonstrated need.
+1. **Spike:** before committing to a production runtime, run a time-boxed prototype of same-session observation/takeover/handback, CLI arbitration, stale-action handling, reconnects, local-app access, egress enforcement, semantic interaction, opt-in diagnostics, cancellation, cleanup, and screenshot publication to public and private PRs. Record the selected runtime/transport, demonstrated limits, and unresolved risks. This validates feasibility; it does not replace the product/security decisions below.
+2. **Before MVP:** define lease recovery, low-privilege test credential handling, diagnostic redaction and retention, and bounded screenshot artifact access/retention. Implement reader/writer authorization from the existing thread policy and the local-app-only egress boundary. UI-change PR screenshots are an MVP requirement when a meaningful, safe before/after pair can be produced.
+3. **MVP:** on-demand local-app testing, live view, takeover/handback, semantic interactions with visual fallback, cancellation, persistent same-thread sessions with idle expiry, opt-in diagnostics, and automatic safe before/after screenshots on applicable UI-change PRs.
+4. **Expand:** consider general external browsing, saved authentication, file handling, recordings, configurable run quotas, and broader browser support only from demonstrated need.
 
-Open decisions: runtime/transport; lease timeout and recovery; idle/restart policy; exact egress and action-confirmation rules; diagnostic redaction and retention; artifact destination and access; and whether broader shell-browser restrictions are required.
+Open decisions: runtime/transport pending the spike; lease timeout and recovery; exact local development endpoints allowed by egress policy; test credential setup; diagnostic redaction and retention; screenshot artifact destination, authorization, retention, and cleanup; idle timeout and warning behavior; and whether broader shell-browser restrictions are required.
 
 ## Success criteria
 
 - Local-app browser sessions start on demand and are reusable within the thread; administrator policy can disable managed browser access.
 - Semantic actions are preferred where available; screenshots cover visual checks and inaccessible interfaces.
-- Users can take over and hand back from the Browser tab; control is exclusive across supported paths and handback refreshes agent context without replaying stale actions.
+- Thread readers can watch browser sessions and thread writers can take over; control is exclusive across supported paths, and handback refreshes agent context without replaying stale actions.
+- Sessions persist across prompts and agent turns, then stop on explicit request, thread deletion/resolution, or idle expiry (provisionally one hour) with a visible warning; expired sessions restart cleanly.
 - Runs can be cancelled, and the agent verifies actual outcomes before reporting success; no fixed per-run quota is required.
-- Diagnostics are opt-in and sanitized; safe, minimal evidence accompanies UI-change PRs only when authorized.
+- Diagnostics are opt-in and sanitized; UI bug-fix and UI-change PRs include a safe, minimal before/after screenshot pair when reproducible and authorized.
 - Credentials, page data, and artifacts follow the defined isolation, access, and retention policies.
