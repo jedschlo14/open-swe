@@ -14,9 +14,4 @@ Restrict browser egress to the authorized local app and required development end
 
 For applicable UI PRs, attach sanitized before/after screenshots when safe and useful; include a recording only when it adds meaningful evidence. Keep captures out of Git and use bounded retention. Do not use bearer download links as PR evidence; they are not scoped to PR readers. The image proxy serves published raster images but cannot upload or support video. Implementation needs a repository-authorized publisher with access checks/retention and a safe video path; otherwise omit evidence and explain why.
 
-## Decisions to close during implementation
-
-These are implementation tasks, not decisions blocking a prototype: select a pinned in-sandbox controller; define network allowlist, test-account policy, and shell behavior during takeover/admin disable; implement durable lease recovery and diagnostic retention; build repository-authorized screenshot publishing and a safe video path.
-
-
 Existing prototypes inform this choice: the right-panel prototype tunnels loopback CDP and streams a screencast but lacks agent tools and lease arbitration; Stagehand's session map is process-local; Browserbase cannot reach the thread sandbox's local app. `agent-browser` is not in the agent runtime contract; Playwright is currently used by UI/E2E only.
