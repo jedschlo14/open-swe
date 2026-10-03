@@ -7,15 +7,22 @@ caller wrote.
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 _REF_PATTERN = r"^@?e\d{1,6}$"
 Ref = Annotated[str, Field(pattern=_REF_PATTERN, description="An element ref from the snapshot.")]
 Coordinate = Annotated[int, Field(ge=0, le=10_000)]
 
 
+def _require_action(schema: dict[str, JsonValue]) -> None:
+    required = schema.setdefault("required", [])
+    if isinstance(required, list) and "action" not in required:
+        required.insert(0, "action")
+
+
 class _Op(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # The action tag has a default for callers in code, but models must always send it.
+    model_config = ConfigDict(extra="forbid", frozen=True, json_schema_extra=_require_action)
 
 
 class NavigateOp(_Op):
