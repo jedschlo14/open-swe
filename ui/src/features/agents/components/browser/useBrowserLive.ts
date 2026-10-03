@@ -17,6 +17,27 @@ interface BrowserFrame {
   metadata: { deviceWidth: number; deviceHeight: number }
 }
 
+export type BrowserInputEvent =
+  | {
+      type: "input_mouse"
+      eventType: "mousePressed" | "mouseReleased" | "mouseMoved" | "mouseWheel"
+      x: number
+      y: number
+      button: "none" | "left" | "middle" | "right"
+      clickCount: number
+      deltaX?: number
+      deltaY?: number
+      modifiers: number
+    }
+  | {
+      type: "input_keyboard"
+      eventType: "keyDown" | "keyUp"
+      key: string
+      code: string
+      text?: string
+      modifiers: number
+    }
+
 const RETRY_DELAY_MS = 3_000
 /** Capacity and server-side failures are worth one more try; access changes are not. */
 const RETRYABLE_CLOSE_CODES = new Set([1011, 1013])
@@ -57,8 +78,15 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
   const [status, setStatus] = useState<BrowserLiveStatus>("idle")
   const [role, setRole] = useState<BrowserLiveConnection["role"] | null>(null)
 
+  const socketRef = useRef<WebSocket | null>(null)
   const attachCanvas = useCallback((node: HTMLCanvasElement | null) => {
     canvasRef.current = node
+  }, [])
+  /** Sends one input event; the server forwards it only while this viewer holds the lease. */
+  const sendInput = useCallback((event: BrowserInputEvent) => {
+    const socket = socketRef.current
+    if (socket?.readyState === WebSocket.OPEN)
+      socket.send(JSON.stringify(event))
   }, [])
 
   useEffect(() => {
@@ -115,6 +143,7 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
             connection.ticket,
           ])
           socket = ws
+          socketRef.current = ws
           ws.onopen = () => {
             if (!disposed) setStatus("live")
           }
@@ -142,12 +171,14 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
     return () => {
       disposed = true
       if (retry) clearTimeout(retry)
+      socketRef.current = null
       socket?.close()
     }
   }, [threadId, sessionId])
 
   return {
     attachCanvas,
+    sendInput,
     status: sessionId ? status : "idle",
     role: sessionId ? role : null,
   }

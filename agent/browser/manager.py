@@ -28,6 +28,7 @@ _START_WAIT = timedelta(seconds=150)
 _START_POLL_SECONDS = 1.0
 _STALE_START = timedelta(minutes=5)
 _STALE_STOP = timedelta(minutes=2)
+_STALE_HANDOFF = timedelta(minutes=1)
 
 SweepOutcome = Literal[
     "no_session", "stale_start", "stale_stop", "thread_closed", "lost", "expired", "warned", "ok"
@@ -289,6 +290,8 @@ async def _sweep_session(session: BrowserSession, now: datetime) -> SweepOutcome
             return "ok"
         await store.finish_stop(session.session_id)
         return "stale_stop"
+    if session.handoff != "none" and now - session.updated_at >= _STALE_HANDOFF:
+        await store.finish_handoff(session.session_id)
     if await _thread_closed(session.thread_id):
         await stop_session(session.thread_id, "thread_closed")
         return "thread_closed"

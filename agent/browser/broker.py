@@ -12,7 +12,7 @@ from langsmith.sandbox import AsyncSandbox
 from pydantic import BaseModel, JsonValue
 
 from agent.browser import engine, manager, policy, store
-from agent.browser.models import BrowserSession, PageRef
+from agent.browser.models import BrowserSession, HandbackNotice, PageRef
 from agent.browser.ops import BrowserOp, ClickOp, NavigateOp, ScreenshotOp, SnapshotOp, commands
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ class BrowserOutcome(BaseModel):
     snapshot: str | None = None
     confirmation_id: str | None = None
     image_base64: str | None = None
+    handback: HandbackNotice | None = None
 
 
 def _text(data: dict[str, JsonValue], key: str) -> str | None:
@@ -114,14 +115,40 @@ async def execute(
         return _not_ready(latest or found)
     try:
         async with engine.connected(session.sandbox_id) as sandbox:
-            return await _execute(sandbox, session, op, confirmation_id)
+            outcome = await _execute(sandbox, session, op, confirmation_id)
     except engine.SandboxLostError:
         await manager.fail(session, "sandbox_lost")
         return BrowserOutcome(
             status="unavailable", message="The sandbox the browser ran in is gone."
         )
     except engine.EngineCommandError as exc:
-        return BrowserOutcome(status="error", message=str(exc))
+        outcome = BrowserOutcome(status="error", message=str(exc))
+    except _Superseded:
+        outcome = _TAKEN_OVER
+    finally:
+        await store.release_agent_action(session.session_id)
+    if outcome.status != "user_in_control" and not await _still_held(session):
+        outcome = _TAKEN_OVER
+    if session.handback_notice is not None:
+        outcome = outcome.model_copy(update={"handback": session.handback_notice})
+    return outcome
+
+
+class _Superseded(Exception):
+    """A person took control while this action was running."""
+
+
+_TAKEN_OVER = BrowserOutcome(
+    status="user_in_control",
+    message=(
+        "A person took control of the browser while this action ran, so its result was "
+        "discarded. Wait for them to hand it back."
+    ),
+)
+
+
+async def _still_held(session: BrowserSession) -> bool:
+    return await store.lease_epoch(session.session_id) == session.lease_epoch
 
 
 async def _decide(sandbox: AsyncSandbox, session: BrowserSession, op: BrowserOp) -> policy.Decision:
@@ -182,7 +209,9 @@ async def _execute(
     if isinstance(op, ScreenshotOp):
         return BrowserOutcome(status="ok", image_base64=await engine.screenshot(sandbox, session))
     data: dict[str, JsonValue] = {}
-    for args in commands(op):
+    for index, args in enumerate(commands(op)):
+        if index and not await _still_held(session):
+            raise _Superseded
         data = await engine.run_command(sandbox, session, args)
     if isinstance(op, SnapshotOp):
         await store.record_refs(session.session_id, _refs(data))
