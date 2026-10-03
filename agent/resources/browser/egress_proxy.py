@@ -1,14 +1,22 @@
-"""Runs inside a thread's sandbox as the browser's only way out.
+"""Runs inside a thread's sandbox and carries every byte in or out of the browser's network.
 
-The browser lives in a network namespace that has nothing but loopback. This
-process listens on that namespace's loopback, makes every outbound connection
-from the sandbox's own namespace, and admits only the ``host:port`` pairs in the
-allowlist file, which it rereads per connection so the broker can widen it
-without a restart. When this process is gone the browser has no network.
+The browser lives in a network namespace that has nothing but loopback.
+
+``proxy`` mode is the browser's only way out: it listens on that namespace's
+loopback, makes every outbound connection from the sandbox's own namespace, and
+admits only the ``host:port`` pairs in the allowlist file, which it rereads per
+connection so the broker can widen it without a restart. When this process is
+gone the browser has no network.
+
+``forward`` mode is the only way in: it listens on the sandbox's loopback and
+connects each client to one port inside the namespace, the browser's live-view
+stream, so the server can tunnel to it.
 
 Standard library only: it runs in whatever image the sandbox booted.
 
-Usage: egress_proxy.py <netns> <listen_port> <allowlist_path>
+Usage:
+    egress_proxy.py proxy <netns> <listen_port> <allowlist_path>
+    egress_proxy.py forward <netns> <namespace_port>
 """
 
 import asyncio
@@ -23,22 +31,28 @@ _CONNECT_TIMEOUT = 15
 _HOP_BY_HOP = {b"proxy-connection", b"connection", b"keep-alive", b"proxy-authorization"}
 
 
-def _listen_in(netns: str, port: int) -> socket.socket:
+def _socket_in(netns: str) -> socket.socket:
+    """A TCP socket that belongs to ``netns``; a socket keeps the namespace it was made in."""
     own = os.open("/proc/self/ns/net", os.O_RDONLY)
     target = os.open(f"/var/run/netns/{netns}", os.O_RDONLY)
     try:
         os.setns(target, os.CLONE_NEWNET)
         try:
-            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind(("127.0.0.1", port))
-            listener.listen(128)
-            listener.setblocking(False)
+            made = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         finally:
             os.setns(own, os.CLONE_NEWNET)
     finally:
         os.close(own)
         os.close(target)
+    made.setblocking(False)
+    return made
+
+
+def _listen_in(netns: str, port: int) -> socket.socket:
+    listener = _socket_in(netns)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", port))
+    listener.listen(128)
     return listener
 
 
@@ -163,5 +177,36 @@ async def _serve(netns: str, port: int, allowlist: Path) -> None:
         await server.serve_forever()
 
 
+async def _forward_one(
+    netns: str, port: int, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter
+) -> None:
+    inner = _socket_in(netns)
+    try:
+        await asyncio.wait_for(
+            asyncio.get_running_loop().sock_connect(inner, ("127.0.0.1", port)), _CONNECT_TIMEOUT
+        )
+    except (OSError, TimeoutError) as exc:
+        print(f"forward failed: {exc!r}", file=sys.stderr, flush=True)
+        inner.close()
+        client_writer.close()
+        return
+    inner_reader, inner_writer = await asyncio.open_connection(sock=inner)
+    await asyncio.gather(_pipe(client_reader, inner_writer), _pipe(inner_reader, client_writer))
+
+
+async def _forward(netns: str, port: int) -> None:
+    server = await asyncio.start_server(
+        lambda reader, writer: _forward_one(netns, port, reader, writer), "127.0.0.1", 0
+    )
+    print(f"ready {server.sockets[0].getsockname()[1]}", flush=True)
+    async with server:
+        await server.serve_forever()
+
+
 if __name__ == "__main__":
-    asyncio.run(_serve(sys.argv[1], int(sys.argv[2]), Path(sys.argv[3])))
+    if sys.argv[1] == "proxy":
+        asyncio.run(_serve(sys.argv[2], int(sys.argv[3]), Path(sys.argv[4])))
+    elif sys.argv[1] == "forward":
+        asyncio.run(_forward(sys.argv[2], int(sys.argv[3])))
+    else:
+        raise SystemExit(f"unknown mode {sys.argv[1]!r}")

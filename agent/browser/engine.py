@@ -96,6 +96,8 @@ def _env(session: BrowserSession) -> dict[str, str]:
         "AGENT_BROWSER_PROXY_BYPASS": "<-loopback>",
         "AGENT_BROWSER_ALLOWED_DOMAINS": allowed_domains(session.approved_endpoints),
         "AGENT_BROWSER_MAX_OUTPUT": str(MAX_OUTPUT_CHARS),
+        "AGENT_BROWSER_STREAM_QUALITY": "60",
+        "AGENT_BROWSER_STREAM_MAX_WIDTH": "1280",
     }
 
 
@@ -181,28 +183,38 @@ async def _isolate(sandbox: AsyncSandbox, session: BrowserSession) -> None:
         raise EgressUnavailableError(setup.stderr.strip() or "network isolation failed")
     await sandbox.write(f"{directory}/egress_proxy.py", _proxy_script())
     await write_allowlist(sandbox, session, session.allowed_endpoints)
-    proxy = shlex.join(
-        [
-            "python3",
-            f"{directory}/egress_proxy.py",
-            session.network_namespace,
-            str(PROXY_PORT),
-            f"{directory}/allow.json",
-        ]
-    )
-    log = shlex.quote(f"{directory}/proxy.log")
+    try:
+        await _start_helper(
+            sandbox,
+            session,
+            "proxy",
+            [session.network_namespace, str(PROXY_PORT), f"{directory}/allow.json"],
+        )
+    except EngineCommandError as exc:
+        raise EgressUnavailableError(str(exc)) from exc
+
+
+async def _start_helper(
+    sandbox: AsyncSandbox, session: BrowserSession, mode: str, args: Sequence[str]
+) -> str:
+    """Start one ``egress_proxy.py`` mode in the background and return its ``ready`` line."""
+    directory = session_dir(session)
+    command = shlex.join(["python3", f"{directory}/egress_proxy.py", mode, *args])
+    log = shlex.quote(f"{directory}/{mode}.log")
+    pid = shlex.quote(f"{directory}/{mode}.pid")
     started = await sandbox.run(
-        f"nohup {proxy} >{log} 2>&1 </dev/null & echo $! >{shlex.quote(directory)}/proxy.pid;"
-        f" for _ in $(seq 50); do grep -qx ready {log} && exit 0; sleep 0.1; done;"
-        f" cat {log} >&2; exit 1",
+        f"nohup {command} >{log} 2>&1 </dev/null & echo $! >{pid};"
+        f" for _ in $(seq 50); do line=$(grep -m1 '^ready' {log}) && echo \"$line\" && exit 0;"
+        f" sleep 0.1; done; cat {log} >&2; exit 1",
         timeout=_COMMAND_TIMEOUT_SECONDS,
     )
     if started.exit_code != 0:
-        raise EgressUnavailableError(started.stderr.strip() or "egress proxy did not start")
+        raise EngineCommandError(started.stderr.strip() or f"browser {mode} did not start")
+    return started.stdout.strip()
 
 
 async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int:
-    """Launch the session's isolated browser and return its loopback stream port."""
+    """Launch the session's isolated browser and return the sandbox-loopback port of its stream."""
     await check_engine(sandbox)
     await _isolate(sandbox, session)
     await run_command(sandbox, session, ["get", "url"], timeout=_LAUNCH_TIMEOUT_SECONDS)
@@ -211,7 +223,11 @@ async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int:
         port = _stream_port(await run_command(sandbox, session, ["stream", "enable"]))
     if port is None:
         raise EngineCommandError("the browser stream did not report a port")
-    return port
+    ready = await _start_helper(sandbox, session, "forward", [session.network_namespace, str(port)])
+    forwarded = ready.removeprefix("ready ").strip()
+    if not forwarded.isdigit():
+        raise EngineCommandError("the stream forward did not report a port")
+    return int(forwarded)
 
 
 async def element_label(
@@ -250,6 +266,7 @@ async def close(sandbox: AsyncSandbox, session: BrowserSession) -> None:
     directory = shlex.quote(session_dir(session))
     namespace = shlex.quote(session.network_namespace)
     await sandbox.run(
-        f"[ -f {directory}/proxy.pid ] && kill $(cat {directory}/proxy.pid) 2>/dev/null;"
+        f"for pid in {directory}/proxy.pid {directory}/forward.pid;"
+        ' do [ -f "$pid" ] && kill $(cat "$pid") 2>/dev/null; done;'
         f" ip netns delete {namespace} 2>/dev/null; rm -rf {directory}; true"
     )

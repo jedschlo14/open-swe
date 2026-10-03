@@ -143,6 +143,7 @@ export function AgentGitPanel({
       threadRef={threadRef}
       terminals={terminals}
       terminalTarget={{ kind: "cloud", threadId: thread.id }}
+      browserThreadId={thread.id}
       cwd=""
       terminalAvailable={terminalAvailable}
       diffAvailable

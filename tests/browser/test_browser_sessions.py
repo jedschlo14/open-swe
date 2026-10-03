@@ -5,6 +5,7 @@ conditional updates, so these run against PostgreSQL rather than a double.
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from fastapi import HTTPException
 from pydantic import JsonValue
 from sqlalchemy import text
 
-from agent.browser import broker, engine, manager, routes, store
+from agent.browser import broker, engine, live, manager, routes, store
 from agent.browser.models import BrowserSession
 from agent.browser.ops import ClickOp, NavigateOp, SnapshotOp
 from agent.database import postgres
@@ -198,3 +199,10 @@ async def test_an_admin_can_watch_a_private_thread_but_not_start_its_browser(
     assert status.state is None
     assert refused.value.status_code == 403
     ensure.assert_not_awaited()
+
+
+def test_a_view_only_viewer_cannot_send_input_to_the_browser() -> None:
+    click = {"type": "input_mouse", "eventType": "mousePressed", "x": 4, "y": 4}
+
+    assert live._viewer_message(json.dumps(click)) is None
+    assert live._viewer_message(json.dumps({"type": "ack", "seq": 7})) == {"type": "ack", "seq": 7}

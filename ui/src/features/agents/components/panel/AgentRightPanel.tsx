@@ -17,6 +17,7 @@ import {
   TerminalActions,
   TerminalPanel,
 } from "@/features/agents/components/TerminalPanel"
+import { BrowserPanel } from "@/features/agents/components/browser/BrowserPanel"
 import { FilesPanel } from "@/features/agents/components/files/FilesPanel"
 import { RightPanelTabs } from "@/features/agents/components/panel/RightPanelTabs"
 import { RightPanelSheet } from "@/features/agents/components/panel/RightPanelSheet"
@@ -43,6 +44,8 @@ export interface AgentRightPanelProps {
   onCollapsedChange: (next: boolean) => void
   onTerminalOpenFile?: (path: string) => void
   onTerminalAddToChat?: (text: string) => void
+  /** The cloud thread whose browser the Browser surface shows; absent elsewhere. */
+  browserThreadId?: string
 }
 
 function useIsNarrowLayout(): boolean {
@@ -102,6 +105,7 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
   const byThreadKey = useRightPanelStore((state) => state.byThreadKey)
   const openSurface = useRightPanelStore((state) => state.open)
   const openTerminalSurface = useRightPanelStore((state) => state.openTerminal)
+  const openBrowserSurface = useRightPanelStore((state) => state.openBrowser)
   const openFileSurface = useRightPanelStore((state) => state.openFile)
   const activateSurface = useRightPanelStore((state) => state.activateSurface)
   const closeSurfaceById = useRightPanelStore((state) => state.closeSurface)
@@ -159,6 +163,10 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
   const handleAddFiles = useCallback(() => {
     openSurface(threadRef, "files")
   }, [openSurface, threadRef])
+
+  const handleAddBrowser = useCallback(() => {
+    openBrowserSurface(threadRef, null)
+  }, [openBrowserSurface, threadRef])
 
   const handleActivate = useCallback(
     (surface: RightPanelSurface) => {
@@ -324,6 +332,15 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
           onOpenFile={(path) => openFileSurface(threadRef, path)}
         />
       ) : null}
+      {activeSurface?.kind === "preview" ? (
+        props.browserThreadId ? (
+          <BrowserPanel threadId={props.browserThreadId} />
+        ) : (
+          <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted-foreground">
+            Browser sessions need a cloud workspace.
+          </div>
+        )
+      ) : null}
       {/* Terminals stay mounted while hidden so their scrollback survives tab
           switches; every other surface unmounts. */}
       {surfaces
@@ -377,6 +394,8 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
       onAddTerminal={handleAddTerminal}
       onAddDiff={handleAddDiff}
       onAddFiles={handleAddFiles}
+      onAddBrowser={handleAddBrowser}
+      browserAvailable={props.browserThreadId !== undefined}
       terminalAvailable={terminalAvailable}
       diffAvailable={diffAvailable}
       layoutControls={layoutControls}

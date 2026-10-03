@@ -3,7 +3,8 @@
 from datetime import datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic.alias_generators import to_camel
 
 SessionState = Literal["starting", "ready", "stopping", "stopped", "failed"]
 ACTIVE_STATES: tuple[SessionState, ...] = ("starting", "ready", "stopping")
@@ -23,8 +24,13 @@ class PageRef(BaseModel):
     name: str
 
 
+_API_CONFIG = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
 class PendingConfirmation(BaseModel):
     """A sensitive action held until a thread writer approves exactly this operation."""
+
+    model_config = _API_CONFIG
 
     confirmation_id: str
     operation: dict[str, JsonValue]
@@ -81,6 +87,8 @@ class BrowserSession(BaseModel):
 
 class BrowserSessionView(BaseModel):
     """What the dashboard shows for a thread's browser."""
+
+    model_config = _API_CONFIG
 
     state: SessionState | None
     session_id: str | None = None
