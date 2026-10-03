@@ -2,7 +2,7 @@
 
 ## Where it runs and when it starts
 
-Run one isolated headless Chromium profile and page per cloud thread in the thread's existing LangSmith-backed coding sandbox, where it can reach the app under test. Start lazily on the first explicit browser action by the agent or an authorized user—not when the thread or panel opens. A session manager ensures and binds the sandbox, including for dashboard-first use, and makes concurrent starts idempotent. The panel entry is presentation state, not session state or authorization. Hiding it does not stop the browser. Stop on request, thread closure, or a provisional one-hour idle timeout; warn before expiry. Local desktop requires a separate adapter.
+Run one isolated headless Chromium profile and page per cloud thread in the thread's existing LangSmith-backed coding sandbox, where it can reach the app under test. Start lazily on the first explicit browser action by the agent or an authorized user—not when the thread or panel opens. A session manager ensures and binds the sandbox, including for dashboard-first use, and makes concurrent starts idempotent. The panel entry is presentation state, not session state or authorization. Hiding it does not stop the browser. Stop on request, thread closure, or an admin-configured idle timeout; warn before expiry. Local desktop requires a separate adapter.
 
 ## How the agent drives it
 
