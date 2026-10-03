@@ -5,6 +5,7 @@ current controller acts), the egress allowlist, and the confirmation gate for
 sensitive actions, whose approvals only a thread writer can grant.
 """
 
+import base64
 import logging
 from typing import Literal
 
@@ -38,6 +39,7 @@ class BrowserOutcome(BaseModel):
     snapshot: str | None = None
     confirmation_id: str | None = None
     image_base64: str | None = None
+    image_mime_type: str | None = None
     handback: HandbackNotice | None = None
 
 
@@ -207,7 +209,12 @@ async def _execute(
         extra={"browser_session_id": session.session_id, "browser_action": op.action},
     )
     if isinstance(op, ScreenshotOp):
-        return BrowserOutcome(status="ok", image_base64=await engine.screenshot(sandbox, session))
+        image = await engine.screenshot(sandbox, session, image_format=op.format)
+        return BrowserOutcome(
+            status="ok",
+            image_base64=base64.b64encode(image).decode(),
+            image_mime_type="image/png" if op.format == "png" else "image/jpeg",
+        )
     data: dict[str, JsonValue] = {}
     for index, args in enumerate(commands(op)):
         if index and not await _still_held(session):
