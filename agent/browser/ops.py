@@ -93,6 +93,7 @@ class DialogOp(_Op):
 
 class ScreenshotOp(_Op):
     action: Literal["screenshot"] = "screenshot"
+    format: Literal["jpeg", "png"] = "jpeg"
 
 
 ActOp = Annotated[

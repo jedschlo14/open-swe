@@ -5,13 +5,15 @@ the lease, the egress allowlist, and the confirmation gate. Page text reaches th
 model inside untrusted-content markers.
 """
 
+import base64
 import json
 
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
-from agent.browser import broker, manager
+from agent.browser import broker, evidence, manager
 from agent.browser.broker import BrowserOutcome
+from agent.browser.evidence import Label
 from agent.browser.ops import ActOp, NavigateOp, ScreenshotOp, SnapshotOp
 from agent.prompts import prompt
 from agent.run_config import RunConfig
@@ -23,6 +25,7 @@ BROWSER_TOOL_NAMES = (
     "browser_snapshot",
     "browser_act",
     "browser_screenshot",
+    "browser_publish_screenshot",
     "browser_stop",
 )
 
@@ -55,6 +58,11 @@ class _NoArgs(BaseModel):
     pass
 
 
+class _PublishArgs(BaseModel):
+    label: Label = Field(description="`before` or `after` for a comparison pair, else `other`.")
+    caption: str = Field(max_length=120, description="Short alt text describing what it shows.")
+
+
 def _context() -> tuple[str, str | None]:
     cfg = RunConfig.from_runtime()
     if not isinstance(cfg.thread_id, str) or not cfg.thread_id:
@@ -63,7 +71,9 @@ def _context() -> tuple[str, str | None]:
 
 
 def _report(outcome: BrowserOutcome) -> str:
-    fields = outcome.model_dump(exclude={"snapshot", "image_base64"}, exclude_none=True)
+    fields = outcome.model_dump(
+        exclude={"snapshot", "image_base64", "image_mime_type"}, exclude_none=True
+    )
     report = json.dumps(fields)
     if outcome.snapshot is None:
         return report
@@ -98,8 +108,47 @@ async def browser_screenshot() -> list[ContentBlock] | str:
         return _report(outcome)
     return [
         {"type": "text", "text": "Viewport screenshot of the thread's browser."},
-        {"type": "image", "base64": outcome.image_base64, "mime_type": "image/jpeg"},
+        {
+            "type": "image",
+            "base64": outcome.image_base64,
+            "mime_type": outcome.image_mime_type or "image/jpeg",
+        },
     ]
+
+
+async def browser_publish_screenshot(label: Label, caption: str) -> str:
+    thread_id, workspace = _context()
+    cfg = RunConfig.from_runtime()
+    if not cfg.repo_full_name:
+        return json.dumps({"status": "error", "message": "This thread has no repository."})
+    outcome = await broker.execute(thread_id, ScreenshotOp(format="png"), workspace_slug=workspace)
+    if outcome.image_base64 is None:
+        return _report(outcome)
+    from agent.github.http import github_client
+    from agent.github.sandbox_access import repository_token
+
+    try:
+        access = await repository_token([cfg.repo_full_name], permissions={"contents": "write"})
+        if not access.token:
+            raise RuntimeError("The GitHub App has no write access to this repository.")
+        async with github_client(token=access.token) as client:
+            published = await evidence.publish_image(
+                client,
+                cfg.repo_full_name,
+                thread_id=thread_id,
+                label=label,
+                caption=caption,
+                data=base64.b64decode(outcome.image_base64),
+                extension="png",
+            )
+    except (evidence.EvidenceError, RuntimeError) as exc:
+        return json.dumps(
+            {
+                "status": "error",
+                "message": f"{exc} Leave the screenshot out of the PR and say why.",
+            }
+        )
+    return json.dumps({"status": "ok", "markdown": published.markdown})
 
 
 async def browser_stop() -> str:
@@ -133,6 +182,12 @@ def browser_tools() -> list[BaseTool]:
             name="browser_screenshot",
             description=prompt("tools/browser_screenshot"),
             args_schema=_NoArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=browser_publish_screenshot,
+            name="browser_publish_screenshot",
+            description=prompt("tools/browser_publish_screenshot"),
+            args_schema=_PublishArgs,
         ),
         StructuredTool.from_function(
             coroutine=browser_stop,

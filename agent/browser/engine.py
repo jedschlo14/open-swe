@@ -11,7 +11,6 @@ browser's DevTools and stream ports stay on the namespace's loopback.
 """
 
 import asyncio
-import base64
 import io
 import json
 import logging
@@ -260,7 +259,7 @@ async def element_label(
 
 
 def _to_viewport_pixels(image: bytes) -> bytes:
-    """Scale a device-pixel JPEG capture down to viewport pixels, the space clicks use."""
+    """Scale a device-pixel capture down to viewport pixels, the space clicks use."""
     with Image.open(io.BytesIO(image)) as source:
         size = (
             max(round(source.width / DEVICE_SCALE_FACTOR), 1),
@@ -268,30 +267,51 @@ def _to_viewport_pixels(image: bytes) -> bytes:
         )
         if size == source.size:
             return image
-        scaled = source.convert("RGB").resize(size, Image.Resampling.LANCZOS)
+        image_format = source.format or "JPEG"
+        if image_format == "JPEG":
+            source = source.convert("RGB")
+        scaled = source.resize(size, Image.Resampling.LANCZOS)
     output = io.BytesIO()
-    scaled.save(output, "JPEG", quality=_SCREENSHOT_QUALITY)
+    if image_format == "JPEG":
+        scaled.save(output, image_format, quality=_SCREENSHOT_QUALITY)
+    else:
+        scaled.save(output, image_format)
     return output.getvalue()
 
 
-async def screenshot(sandbox: AsyncSandbox, session: BrowserSession) -> str:
-    """Capture the viewport as JPEG, delete the file, and return it base64-encoded."""
-    path = f"{session_dir(session)}/capture.jpg"
-    await run_command(
-        sandbox,
-        session,
-        [
-            "screenshot",
-            "--screenshot-format",
-            "jpeg",
-            "--screenshot-quality",
-            str(_SCREENSHOT_QUALITY),
-            path,
-        ],
-    )
+_MASK_ID = "open-swe-capture-mask"
+_MASK_ON = (
+    "(() => {{ const s = document.createElement('style'); s.id = '{id}';"
+    " s.textContent = 'input[type=password]{{visibility:hidden!important}}"
+    " input:-webkit-autofill{{-webkit-text-fill-color:transparent!important;"
+    "color:transparent!important}}'; document.documentElement.appendChild(s); return true; }})()"
+)
+_MASK_OFF = "document.getElementById('{id}')?.remove() ?? true"
+
+
+async def screenshot(
+    sandbox: AsyncSandbox, session: BrowserSession, *, image_format: str = "jpeg"
+) -> bytes:
+    """Capture the viewport with password and autofilled fields hidden; the file is deleted after."""
+    extension = "png" if image_format == "png" else "jpg"
+    path = f"{session_dir(session)}/capture.{extension}"
+    await run_command(sandbox, session, ["eval", _MASK_ON.format(id=_MASK_ID)])
     try:
-        image = await asyncio.to_thread(_to_viewport_pixels, await sandbox.read(path))
-        return base64.b64encode(image).decode()
+        options = (
+            ["--screenshot-format", "png"]
+            if extension == "png"
+            else [
+                "--screenshot-format",
+                "jpeg",
+                "--screenshot-quality",
+                str(_SCREENSHOT_QUALITY),
+            ]
+        )
+        await run_command(sandbox, session, ["screenshot", *options, path])
+    finally:
+        await run_command(sandbox, session, ["eval", _MASK_OFF.format(id=_MASK_ID)])
+    try:
+        return await asyncio.to_thread(_to_viewport_pixels, await sandbox.read(path))
     finally:
         await sandbox.run(f"rm -f {shlex.quote(path)}")
 

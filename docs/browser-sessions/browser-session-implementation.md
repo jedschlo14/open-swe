@@ -20,6 +20,22 @@ Authorize live view with thread-read access and control with thread-write access
 
 ## How screenshots and recordings get into the PR
 
+Capture and sanitize evidence in the sandbox: viewport only, with password and autofilled fields hidden. For applicable UI-change and UI-bug-fix PRs, publish a before/after screenshot pair to the repository's own evidence branch and embed it in the PR with a `blob/<branch>/<path>?raw=true` link. GitHub decides who can see the image, so access follows repository access and a link never outlives it. The evidence branch is a single parentless commit rewritten on every publish, and files older than 30 days are dropped from its tree, so retention holds and no history keeps them reachable. It is never the PR's own branch, and captures stay out of the PR's history. Never use bearer download links as PR evidence. Include a recording only when it adds meaningful evidence and an approved, access-controlled publisher exists for video; none does yet. If publishing fails or the page shows private content, omit the evidence and explain why.
+
+The existing PR image proxy displays published raster images but cannot upload media or support video.
+
+## How egress is contained
+
+A sandbox-wide allowlist would also cut off git, package installs, and the app's own backend, so containment is per browser instead. Each session's browser runs in its own network namespace that has only loopback. Its only way out is an egress proxy that listens on that loopback, connects from the sandbox's own namespace, and admits only the session's allowlist of `host:port` pairs for every request, redirect, and subresource. The browser's own domain allowlist is a second fence that also disables WebRTC. If the proxy is not running, the browser has no network: it fails closed.
+
+The allowlist starts with the external endpoints an admin approved (`browser_approved_dev_endpoints`). A loopback origin is added when an authorized controller explicitly navigates to it, together with any other loopback origins named in that navigation (`allow_origins`). Navigating to an approved external endpoint, or acting on one of its pages, needs a person's confirmation. Everything else is refused. Browsers launched from the shell are not contained, because the agent's shell has root in the sandbox.
+
+## How a user watches and takes control
+
+Authorize live view with thread-read access and control with thread-write access, rechecking on connect and each action. Do not rely on terminal authorization for read-only viewers. A single lease arbitrates browser actions. Before takeover, stop dispatching agent actions and settle or cancel in-flight work. While the user controls the page, the agent sends no browser actions. On handback, revoke user input, discard stale actions, and refresh the agent's page context. Disconnect alone does not transfer control; stop or failure revokes the lease. Show the current controller and handoff state. Browser-level arbitration cannot constrain shell-launched browsers unless shell access is also gated.
+
+## How screenshots and recordings get into the PR
+
 Capture and sanitize evidence in the sandbox. For applicable UI-change and UI-bug-fix PRs, upload a before/after screenshot pair through a repository-authorized publisher, then add the resulting image references to the PR; include a recording only when it adds meaningful evidence and link it through an approved, access-controlled publisher. Never use bearer download links as PR evidence: they may outlive access and are not scoped to PR readers. Keep captures out of Git, exclude unrelated private content, and apply bounded retention. If safe publishing is unavailable, omit the evidence and explain why.
 
-PR publishing may follow the session MVP; until a publisher verifies repository access and enforces retention, omit evidence and explain why. The existing PR image proxy displays published raster images but cannot upload media or support video. Treat page content as untrusted and enforce authorization in the executor.
+The existing PR image proxy displays published raster images but cannot upload media or support video. Treat page content as untrusted and enforce authorization in the executor.
