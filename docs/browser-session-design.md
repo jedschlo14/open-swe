@@ -1,166 +1,137 @@
-# Browser sessions for interactive UI development
+# Interactive browser sessions
 
 **Status:** Draft for discussion
 
-**Scope:** Product and architecture proposal; implementation details remain to validate
+**Scope:** Product and architecture proposal; implementation choices remain to validate
 
 ## Summary
 
-Give each Open SWE thread an optional, isolated browser session that the agent can use for UI work and the user can observe live from the thread. The agent normally drives the browser without interruption. A user can take control when needed—for example, to complete a login—and hand control back to the agent in the same session. For UI-fix work, Open SWE should produce concise, task-focused visual evidence and include it with the pull request automatically.
+Give Open SWE browser access for tasks that benefit from interacting with websites and applications. Thread participants can watch live, take control when needed, and hand the same session back without losing page or authentication state. The browser starts on demand; ordinary agent work needs no routine approval gates. When visual evidence helps explain the result, capture relevant screenshots or short recordings for the PR or thread.
 
-The initial implementation should use headless Chromium. “Headless” describes how the browser runs, not whether people can see or control it: the dashboard presents a live view and relays user input. Headed browser and desktop streaming are not needed for the target workflow and are out of scope for the first release.
+## Representative workflows
 
-Browser support is enabled by default, but the browser should start lazily when a task needs it rather than opening on every thread. Users can disable it for an individual thread. Workspace/deployment administrators need a hard disable that prevents the managed browser capability from being provisioned or used.
+- Build or modify a UI and verify it in the running application.
+- Reproduce and diagnose a bug.
+- Inspect websites or JavaScript-rendered documentation.
+- Exercise authenticated application flows.
+- Capture visual evidence for a PR or explanation.
 
-## Problem and target workflow
+For example, the agent starts a local app, investigates a UI bug while the user watches, accepts a user-completed login, then verifies the fix and attaches evidence to the PR.
 
-The primary use case is fixing a UI bug:
+Choose tools by task: prefer APIs, search, or HTTP retrieval when sufficient; use the browser when rendering, interaction, authentication, or visual context makes it more suitable. This is browser access, not a general remote desktop.
 
-1. The user asks Open SWE to fix a UI bug.
-2. Open SWE starts the app and opens it in the browser.
-3. The user can watch the live page from the thread while the agent investigates and verifies the fix.
-4. If the agent is blocked—for example, by a login—the user can take control, complete the step, and hand the same browser back.
-5. Open SWE captures the fixed behavior and automatically includes concise evidence with the PR.
+## Initial scope
 
-The browser is part of the coding workflow, not a general-purpose remote desktop. It should accelerate development rather than introduce routine approval gates.
+Include on-demand browsing, live observation, same-session takeover, scoped authorization, screenshots, and short task-focused recordings.
 
-## Goals
+Defer desktop streaming, browser-chrome controls, headed mode, seamless mode switching, and comprehensive support for engines, extensions, CAPTCHA, hardware keys, or OS authentication. Continuous recording and indefinite retention of all activity are outside the initial scope; selected intermediate screenshots and before/after captures are supported.
 
-- Let the agent exercise real, JavaScript-rendered applications during development and verification.
-- Let thread participants observe the current browser view in near real time.
-- Support explicit, race-free user takeover and handback without losing page or authentication state.
-- Keep the agent autonomous for ordinary development work; observation alone must not pause the agent.
-- Support task-authorized credentials through more than manual login, while minimizing repeated permission prompts.
-- Automatically produce useful, appropriately scoped visual evidence for UI-fix PRs.
-- Make browser use optional per thread and completely disableable at workspace/deployment level.
-- Isolate browser processes and state to the thread and clean them up promptly.
-
-## Non-goals for the first release
-
-- A general remote desktop, operating-system desktop, or browser-chrome control surface.
-- Headed mode, virtual desktop streaming, or seamless headless-to-headed switching.
-- Cross-thread browser profiles, persistent personal browsing profiles, or a general credential vault.
-- Browser use as a substitute for API tools, web search, or HTTP fetch.
-- Mandatory user approval for ordinary clicks, typing, navigation, screenshots, or other routine test actions.
-- Continuous session recording, long-term video archives, or retaining every intermediate screenshot.
-- Supporting every browser engine, mobile browser, extension, CAPTCHA, hardware-key, or OS-authentication flow.
+Saved authentication across threads is worth exploring separately. It does not require building a general credential vault.
 
 ## Product behavior
 
-### Enablement and startup
+The browser lives in the dashboard's right panel, alongside Terminal, Changes, and Files. Its Browser tab contains the live view, session status, and takeover/handback controls.
 
-- The feature is available by default, subject to an administrator's hard-disable policy.
-- A thread-level control can turn browser access off. Turning it off ends or disables that thread's managed browser session and removes browser controls from the thread UI.
-- The browser starts lazily when the agent needs it for a UI task, such as starting a local app and opening its URL. Merely opening a thread does not start Chromium.
-- If browser startup or streaming is unavailable, the agent reports the limitation and continues with other available methods where possible; it should not silently imply that the user can see a live session.
-- Browser settings, credentials, and session state are scoped to the thread and are ephemeral by default.
+### Startup and controls
+
+- Managed browser support is available by default, subject to administrator policy. The first browser action starts or connects to the thread's session; later actions reuse it. Opening a thread or panel does not launch a browser.
+- Closing the panel only hides the view; agent browsing continues.
+- Stopping the session ends that browser process. A later browser action may start a fresh session; the UI must explain possible loss of page or login state. Stopping is not disabling future browsing.
+- Do not introduce a per-thread switch that disables all browser tooling. Administrator controls apply to the managed capability; broader sandbox restrictions are a separate enforcement decision.
+- Report startup or streaming failures accurately and continue with other methods where possible.
 
 ### Observe, take over, and hand back
 
-- A live view is available while the agent is driving. Watching is passive and does not pause the agent.
-- **Take over** atomically pauses browser actions by the agent and grants the user the input lease. The rest of the coding run need not be paused unless it reaches a browser action that must wait for control.
-- While the user owns the input lease, the agent cannot concurrently click, type, navigate, or otherwise mutate the page. Browser actions wait or return a recoverable “user has control” result; they must not race ahead against a stale page.
-- **Hand back** releases the user's lease, lets the agent inspect the current page, and resumes browser work from the resulting state. The agent must not assume the page is unchanged from before takeover.
-- Control is single-writer. Other authorized participants can watch but cannot send input until control is released or transferred.
-- If the dashboard disconnects, input is disabled until the view is current again. The browser session may continue under its existing controller; the UI must show that the view is stale and who still owns control.
+Watching is passive. **Take over** grants an exclusive input lease to one authorized participant after in-flight agent actions have settled or been safely cancelled. While the user holds it, agent actions targeting that session wait or return a recoverable control-conflict result. Unrelated coding work can continue.
 
-### State model
+**Hand back** releases the user lease. The agent inspects the current page before resuming; stale queued actions must not replay blindly. All access paths to the shared session, including CLI-issued actions, must respect the lease.
 
-Do not represent the session with one overloaded status enum. Lifecycle, transport, controller, and agent activity are independent dimensions. The UI can combine them into concise labels.
+Other authorized participants may watch. A stale or disconnected viewer cannot send input. A controlling user's disconnect must not silently return control immediately or block the agent indefinitely: define a visible lease-expiration and recovery policy before release.
 
-| Dimension | Representative states | Meaning |
-|---|---|---|
-| Session lifecycle | off, starting, ready, stopping, ended, failed | Whether a managed browser session exists and can be used. |
-| Dashboard connection | live, reconnecting, disconnected | Whether the dashboard has a current view and can safely relay input. |
-| Input controller | agent, user, none | Which actor holds the exclusive input lease. |
-| Agent activity | acting, idle, waiting for user, waiting for control, finished, failed | What the agent is doing with respect to browser work. |
+### Minimal state model
 
-“Paused” is not a controller: it means the agent is not currently taking browser actions. “User is controlling” means the user owns the input lease, which implies the agent is paused for browser actions. “Waiting for user” means the agent has explicitly reached a point where user help is needed, but the user has not necessarily taken control. “Reconnecting” is a transport condition, not a lifecycle or control state.
+Keep independent facts without introducing four new state machines:
 
-Example user-facing labels include **Agent is driving**, **You’re driving**, **Waiting for you**, **Reconnecting — view may be stale**, and **Browser unavailable**. A failed session and a disconnected dashboard must remain distinguishable.
+| Concern | Proposed representation |
+|---|---|
+| Session lifecycle | `starting`, `ready`, `stopping`, `failed`; absence means no active session. Disabled is policy; ended is history. |
+| View connection | Per-viewer transport status and freshness, not a global session state. |
+| Control | Exclusive lease owned by the agent or a specific participant, valid only for a usable session. |
+| Agent progress | Reuse existing run/tool activity. Derive waiting for control from a blocked action; represent an explicit help request separately. |
+
+The UI must communicate availability, view freshness, control ownership, requested help, and available actions. Labels such as **Agent has control**, **You have control**, and **View disconnected** are illustrative, not a fixed vocabulary. Ownership does not imply activity; browser failure must remain distinguishable from viewer disconnection.
+
+## Persistence
+
+| Data | Proposed lifetime |
+|---|---|
+| Browser preferences | Persist at the appropriate user/workspace scope. |
+| Page state and authentication | Preserve across agent turns and handoff within the thread; define idle cleanup and restart behavior. |
+| Existing managed credentials | Keep their existing storage lifecycle; scope and expire browser access grants separately. |
+| Final screenshots and recordings | Retain under artifact policy, independently of browser lifetime. |
+| Temporary captures and downloads | Thread-isolated, with bounded cleanup windows. |
+
+Do not automatically carry cookies between threads. An opt-in saved-authentication feature needs explicit ownership, permitted destinations, participant access, expiration, and revocation. In shared threads, a personal login can expose account data to other viewers and controllers; disclose and authorize that access before reuse.
 
 ## Credentials and authorization
 
-Browser tasks may need access to application credentials. User takeover for a web login is useful, but it is not the only possible source. The design should support a small set of explicit, scoped sources rather than treating arbitrary credentials as ordinary prompt text.
+Candidate credential sources:
 
-Candidate sources to support and validate:
+- **Application environment:** task-local configuration such as `.env`; inject into the app without exposing values in model context, logs, or artifacts where possible. A file's presence does not authorize every credential in it.
+- **Managed connections:** existing integrations, resolved at runtime for the intended service and participant.
+- **Browser login:** the user authenticates during takeover and hands back the same session.
+- **Task-scoped secrets:** a secure input mechanism, never requests to paste secrets into chat.
 
-1. **Application runtime environment:** project `.env` or other task-local configuration used to start the app. Where possible, inject values into the app process without echoing secret values into model context, tool output, logs, screenshots, or PR artifacts.
-2. **Open SWE-managed connections:** existing workspace or user integration credentials, resolved at runtime and limited to the intended service and participant.
-3. **User authentication in the live browser:** the user signs in during takeover; the same browser retains the resulting session when control returns to the agent.
-4. **Task-scoped user-provided secrets:** a secure UI or secret mechanism may grant a specific credential for a stated task. Do not ask users to paste secrets into chat.
+Authentication supplies access; authorization defines allowed actions. Users may preauthorize all otherwise-confirmable actions within a stated task, application/account, and duration. Grants must be visible, revocable, and bounded by administrator restrictions. Do not repeatedly prompt within a grant; request additional authorization only outside it. Routine local testing needs no extra confirmation when already authorized.
 
-Credential access should be explicit, least-privilege, and short-lived where possible. A `.env` file can contain production credentials as well as local test values; its presence in a repository is not itself proof that every value is safe to use. The system should distinguish local/test credentials from credentials that grant access to real external systems.
+Handback after login lets the agent act through that account; make this clear. Distinguish local/test access from consequential external access. Permission to browse private content is not permission to publish it in a PR. Exact grant boundaries and credential classification remain implementation decisions.
 
-Avoid per-click confirmation. Prefer one task- or credential-scope authorization that states what the agent can access and for how long. For routine local UI testing, no extra confirmation should be required when the task's authorized environment already provides the needed access. If credentials grant consequential access, use a narrow scope and avoid prompting repeatedly; request a step-up only when the agent needs authority materially beyond the task's granted scope, or decline an action prohibited by policy. Exact credential classification and step-up behavior remain open design decisions.
+## Visual evidence
 
-After a user signs in and hands the browser back, the agent can act with the authority of that authenticated session. Make this consequence clear in the UI. Do not persist browser cookies or authentication state beyond the thread unless a separate, explicit feature is designed for it.
+- Capture useful screenshots automatically, including before/after pairs when a meaningful baseline exists. Allow on-demand and selected intermediate captures.
+- Use short recordings when stills cannot convey behavior, with configurable duration/size limits. Record the demonstration, not the entire session.
+- Attach relevant evidence to the resulting PR, or provide a thread artifact when there is no PR. This applies to features, investigations, and explanations as well as UI fixes.
+- Exclude credentials and unrelated private content; avoid capturing login entry and authentication handoff. Mask sensitive regions where feasible. If safe capture is uncertain, omit the evidence and explain why.
+- Keep generated evidence out of source control by default. Validate artifact access and retention for public/private repositories before release; clean up temporary capture data separately.
 
-## Evidence for pull requests
+## Runtime and architecture
 
-Evidence is part of the UI-fix workflow and should be automatic, not another routine approval gate.
+Start with one isolated headless Chromium session per thread and a primary page. Headless does not mean invisible: the dashboard supplies the live view and input relay. Headed/desktop support would require a demonstrated need and separate design.
 
-- Capture task-relevant screenshots of the fixed state; capture a before/after pair when a meaningful “before” state is available.
-- For behavior that is hard to convey in still images, create a short, focused recording of the relevant interaction. Do not record the whole browser session. A configurable hard duration/size cap should be chosen during implementation; a short clip on the order of tens of seconds is a reasonable starting point to validate.
-- Start capture only for the demonstration, not for the entire development session. Delete temporary raw capture data after the final evidence is produced or after a short cleanup window.
-- Automatically attach evidence to the PR when the task results in a UI-fix PR. If no PR is opened, make it available as a thread artifact.
-- Evidence must not include passwords, tokens, secret-bearing fields, or unrelated private content. Mask password and secret inputs where technically possible; avoid recording login entry and authentication handoff. If evidence cannot be safely scoped, omit it and tell the user rather than silently publishing sensitive content.
-- Do not commit generated screenshots or videos into the source tree by default. Use a PR-compatible artifact mechanism with access controls appropriate to the repository; its storage, retention, and private/public PR behavior must be validated before implementation.
+Evaluate `agent-browser` first rather than assume a parallel stack is necessary. Its availability alone does not establish integration with thread authorization, shared-session arbitration, streaming, or evidence delivery.
 
-## Browser mode and live view
+Logical boundaries:
 
-The first release uses one isolated headless Chromium session per thread, with a primary page for the target app. Headless Chromium can render the app, execute JavaScript, accept browser-level input through automation, and produce screenshots/video. The dashboard's live view and input relay provide visibility and takeover; a visible OS window is not required.
+1. **Session manager:** owns thread association, lifecycle, cleanup, and managed-capability policy.
+2. **Runtime and control arbiter:** execute browser actions and user input against the same session; enforce the lease across tools and CLI access.
+3. **Authenticated dashboard channel:** streams the view and relays authorized input. Never expose raw CDP, unauthenticated browser ports, or sandbox credentials to clients.
+4. **Evidence pipeline:** produces scoped captures and publishes them under artifact policy.
+5. **Authorization:** checks participant capabilities, credential grants, and publication permissions server-side.
 
-Headed mode is out of scope. It would be reconsidered only for a demonstrated requirement such as testing browser chrome/extensions, an OS-level flow, or a display/GPU-specific defect. Those cases may need desktop streaming, not merely launching Chromium in headed mode. Do not promise that switching a running session between modes is seamless: it may require a new process and could lose page state or authentication.
+A technical spike must validate runtime and transport choices, latency, reconnects, in-flight action handling, authentication continuity, local app access, resource cost, and cleanup.
 
-The runtime choice is open. `agent-browser` is available in some task sandboxes and exposes browser control/streaming capabilities, but its presence in a sandbox does not establish that it is integrated with Open SWE's thread authorization, dashboard transport, lifecycle, or evidence flow. Evaluate it alongside other viable runtimes against the requirements below.
+## Security and failure requirements
 
-## Proposed architecture boundaries
+- Authorize every session, view, and control request; thread visibility alone need not grant control or credential access.
+- Isolate browser profiles and temporary data to the thread; apply the lifetimes above.
+- Enforce sandbox egress/SSRF policy. Treat page content as untrusted agent input.
+- Log operational metadata, not credentials, cookies, page contents, or captures by default.
+- Mark stale views and disable their input; distinguish stream loss from runtime failure.
+- Administrator hard-disable blocks managed provisioning, tool exposure, streaming, and control endpoints. Do not claim it blocks standalone browser binaries through shell access unless separately enforced. Hiding a UI control is not enforcement.
 
-This is a logical design, not a prescribed transport implementation.
+## Rollout and open decisions
 
-1. **Thread-scoped browser session manager** owns lifecycle and associates exactly one managed session with the authorized thread. It starts/stops the browser in that thread's isolated sandbox and enforces the feature-disable policy.
-2. **Browser runtime** owns Chromium and performs navigation, agent actions, user input, page inspection, and bounded capture. All agent browser actions and user input pass through one control arbiter; neither actor can bypass the input lease through the managed interface.
-3. **Authenticated dashboard channel** carries the live view to authorized thread participants and relays user input back through the session manager. Do not expose raw Chrome DevTools Protocol (CDP), an unauthenticated browser port, or sandbox credentials to the browser client.
-4. **Agent browser tools** operate on the same session shown in the dashboard. While the user has control, calls are serialized or suspended and resume only after handback; on resume, refresh page context.
-5. **Evidence pipeline** creates bounded task-focused captures, applies secret/private-content protections, and attaches the result to the PR or thread artifact without adding generated files to the repository.
-6. **Policy layer** combines deployment/workspace hard-disable, per-thread user disable, participant authorization, credential scope, and artifact policy. A UI toggle alone is not an enforcement boundary.
+1. **Spike:** validate the shared-session integration, CLI arbitration, takeover, reconnects, local/external navigation, credential handling, and captures.
+2. **Before MVP release:** settle participant authorization, credential isolation and grants, egress enforcement, safe artifact publication, retention, lease recovery, and administrator-disable scope.
+3. **MVP:** on-demand browser, live view, takeover/handback, scoped preauthorization, and automatic relevant evidence for PRs or threads.
+4. **Expand:** consider saved authentication, additional tabs/engines, and headed/desktop workflows from demonstrated need.
 
-The streaming transport (for example, WebRTC versus image/frame updates over a WebSocket) and browser automation runtime must be selected by a technical spike. Validate latency, bandwidth, reconnect behavior, same-session input handoff, authenticated access, capture quality, resource cost, and cleanup. Do not expose a direct browser/CDP endpoint to solve streaming before reviewing its security boundary.
-
-## Privacy, security, and failure behavior
-
-- Browser process, profile, cookies, downloads, and temporary captures are isolated to the thread and removed when no longer needed.
-- Enforce authorization on every session/view/control request; verify thread participation and appropriate capability on the server, not only in the dashboard.
-- Validate outbound browser navigation and network access against sandbox egress/SSRF policy. The browser must not become an unrestricted path to private infrastructure or instance credentials.
-- Treat webpage text, screenshots, and accessible content as untrusted input to the agent.
-- Do not log credential values, cookies, page contents, screenshots, or video frames by default. Operational telemetry should record lifecycle and error metadata only.
-- If the stream drops, visibly mark stale output and disable user input. If browser control or the runtime fails, report the failure and allow the agent to continue with non-browser work where safe.
-- A workspace/deployment hard disable must prevent session provisioning, tool exposure, streaming, and control endpoint use. If the sandbox image includes a standalone browser CLI that an agent can run through shell access, determine whether that CLI must also be excluded or restricted to make “disabled” a stronger guarantee; hiding the product tool alone is insufficient.
-
-## Rollout proposal
-
-1. **Feasibility spike:** Confirm one runtime can keep a browser session in the thread sandbox while delivering a live dashboard view and accepting user input on the same page. Test takeover/handback, disconnection, local app access, `.env`-backed app startup, and capture cleanup.
-2. **MVP:** Ship opt-out per thread and administrator hard-disable; lazy headless session; live view; single-controller takeover/handback; local application testing; automatic bounded screenshot evidence and focused short recording where useful; PR attachment.
-3. **Harden:** Validate credential sources/scopes, repository privacy and artifact retention, authorization and egress enforcement, resource quotas, and observability before broad enablement.
-4. **Expand only from demonstrated need:** Additional tabs, browser engines, extensions, persistent profiles, headed/desktop mode, and broader credential sources are separate decisions.
-
-## Open questions
-
-These questions do not block this product draft, but need answers before or during implementation:
-
-1. **Default and admin policy:** Confirm whether “on by default” means enabled capability with lazy startup (proposed here), and whether the hard disable is deployment-wide, workspace-specific, or both.
-2. **Credential contract:** Which of the candidate credential sources are MVP requirements? How can Open SWE distinguish local/test secrets from production or consequential credentials? What task scope and lifetime should a grant have?
-3. **Step-up boundary:** Which actions materially exceed an existing task-scoped authorization and should trigger one consolidated confirmation or be disallowed? How can the policy avoid prompts for routine test actions?
-4. **Evidence destination:** What PR-compatible storage supports private and public repositories with appropriate viewer access and retention? Should stills always attach, with recordings only when useful, or should every UI-fix PR include a short clip?
-5. **Redaction and safe capture:** Which fields and page regions can be reliably excluded or masked? What should happen when safe capture cannot be guaranteed?
-6. **Runtime and stream:** Can `agent-browser` or another runtime meet same-session viewing/control, thread authorization, reconnect, and lifecycle requirements without exposing CDP? Which transport provides acceptable latency and cost?
-7. **Hard-disable guarantee:** Should disabling the managed browser capability also prevent browser binaries/CLI use through the general-purpose sandbox shell, and what enforcement mechanism is available?
+Open decisions: runtime/transport; supported MVP credential sources; grant and step-up boundaries; idle/restart and disconnected-controller timeouts; artifact storage and redaction limits; deployment/workspace policy scope; and whether broader shell-browser restrictions are required.
 
 ## Success criteria
 
-- A user asks for a UI fix; Open SWE starts the app, opens it in the thread's browser, and the dashboard shows a live, current view without user intervention.
-- The user can take over at a login or other genuine blocker, interact without agent/browser races, and hand back the same session with authentication and page state intact.
-- The agent continues verification and produces concise evidence automatically attached to the resulting PR, with no unnecessary session-long recording or routine approval prompts.
-- Per-thread disable and administrator hard-disable prevent the managed browser capability and its view/control paths from being used.
-- Browser cleanup removes ephemeral session state and temporary captures according to the defined retention policy.
+- Browser tasks start on demand and reuse the session without requiring a viewer or routine approval prompts.
+- Users can observe and take over without agent input races; handback preserves page/authentication state and refreshes agent context.
+- Closing the panel does not disable browsing; stale viewers cannot send input.
+- Relevant, safe evidence accompanies PRs or thread results without continuous recording.
+- Preauthorization avoids repeat prompts within scope; administrator controls and data-lifetime policies are enforced.
