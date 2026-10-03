@@ -6,7 +6,7 @@
 
 ## Summary
 
-Give Open SWE an isolated, thread-scoped browser for testing and debugging applications. For the cloud MVP, run headless Chromium in the thread's coding sandbox so it can reach the agent's local app. Start it only on explicit browser use—not when a thread or panel opens—and share the session between the agent and dashboard through an authenticated broker. Prefer semantic interaction, with screenshots for visual checks and safe evidence.
+Give Open SWE an isolated, thread-scoped browser for testing and debugging applications. For the initial cloud runtime, run headless Chromium in the thread's coding sandbox so it can reach the agent's local app. Start it only on explicit browser use—not when a thread or panel opens—and share the session between the agent and dashboard through an authenticated broker. Prefer semantic interaction, with screenshots for visual checks and safe evidence.
 
 ## Workflows and scope
 
@@ -16,13 +16,13 @@ Give Open SWE an isolated, thread-scoped browser for testing and debugging appli
 
 ## Product behavior
 
-The Browser surface belongs in the thread's right panel alongside Terminal, Changes, and Files. It shows session status, the live view, control ownership, and available actions. The current panel store can persist a browser placeholder, but the `dev` panel does not render or connect a browser surface; restoring a descriptor must not start compute.
+The Browser surface belongs in the thread's right panel alongside Terminal, Changes, and Files. It shows session status, the live view, control ownership, and available actions. The current panel store can persist a Browser tab entry, but the right panel does not yet render or connect a browser surface; restoring a saved entry must not start compute.
 
 ### Startup and controls
 
-- The cloud MVP targets LangSmith-backed thread sandboxes. Reuse the thread's sandbox and workspace snapshot; local desktop sessions need a separate host adapter.
+- The initial cloud runtime targets LangSmith-backed thread sandboxes. Reuse the thread's sandbox and workspace snapshot; local desktop sessions need a separate host adapter.
 - The first explicit browser action starts Chromium. Agent execution already creates or reconnects the sandbox through `ensure_sandbox_for_thread`; dashboard terminal connection only accepts an existing sandbox. Dashboard-first browser use therefore needs an authorized, idempotent start path that binds the sandbox to the thread. Opening or restoring a panel must not provision it.
-- Managed browser support should be gated by an administrator policy across provisioning, agent tools, viewing, and control. No browser-specific flag exists on `dev` today.
+- Managed browser support should be gated by an administrator policy across provisioning, agent tools, viewing, and control. There is currently no browser-specific administrator flag.
 - Hiding the panel does not stop the session. Stopping ends the process and may lose page state. Support cancellation and normal infrastructure timeouts; inspect the page after meaningful actions before claiming success.
 
 ### Observe and take control
@@ -53,9 +53,9 @@ Sanitize captures, exclude unrelated private content, and mask sensitive regions
 
 ## Runtime and architecture
 
-Use one isolated headless Chromium profile and primary page per cloud thread. The `johannes/right-panel-browser` experiment is the closest transport prototype: it installs Chromium in an existing sandbox, binds DevTools to loopback, tunnels CDP to the app server, and uses a short-lived ticket and dashboard screencast. It requires a pre-existing sandbox, reuses terminal authorization, and relays raw CDP; it does not provide agent browser tools or shared agent/user lease arbitration. Keep CDP private in production and expose narrower browser operations through a broker.
+Use one isolated headless Chromium profile and primary page per cloud thread. An existing right-panel browser prototype is the closest transport example: it installs Chromium in an existing sandbox, binds DevTools to loopback, tunnels CDP to the app server, and uses a short-lived ticket and dashboard screencast. It requires a pre-existing sandbox, reuses terminal authorization, and relays raw CDP; it does not provide agent browser tools or shared agent/user lease arbitration. Keep CDP private in production and expose narrower browser operations through a broker.
 
-The `feat/browserbase-stagehand-tool` experiment adds semantic Stagehand tools, but its session map is process-local; Browserbase runs outside the thread sandbox and cannot reach its localhost app. The `agent-browser` CLI supports CDP but is not declared in the `dev` runtime contract; Playwright is used by the UI/E2E workspace, not the agent runtime. Choose and pin an in-sandbox controller during implementation.
+An existing Stagehand browser-tools prototype adds semantic interaction, but its session map is process-local; Browserbase runs outside the thread sandbox and cannot reach its localhost app. The `agent-browser` CLI supports CDP but is not part of the current agent runtime contract; Playwright is used by the UI/E2E workspace, not the agent runtime. Choose and pin an in-sandbox controller during implementation.
 
 1. **Session manager:** thread association, explicit-use startup, workspace/snapshot selection, lifecycle, cleanup, and admin policy. Make dashboard-first startup idempotent and safe under concurrent requests.
 2. **Browser runtime and arbiter:** connect agent tools and dashboard controls to the same page and enforce one lease. Sandbox shell access can bypass a cooperative browser lease; constrain it, gate it during takeover, or clearly limit the exclusivity guarantee.
