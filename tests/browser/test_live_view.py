@@ -80,3 +80,26 @@ def test_a_press_carries_the_element_it_landed_on() -> None:
 )
 def test_the_address_bar_adds_a_scheme(typed: str, expected: str) -> None:
     assert with_scheme(typed) == expected
+
+
+class _Cdp:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, dict[str, object]]] = []
+
+    async def send(
+        self, method: str, params: dict[str, object] | None, session: str | None
+    ) -> dict[str, object]:
+        self.sent.append((method, params or {}))
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_pasted_text_reaches_the_page_in_order_with_keys(bridge: ModuleType) -> None:
+    mirror = bridge.Mirror("", "")
+    cdp = _Cdp()
+    mirror.cdp = cdp
+    await mirror.input({"type": "paste", "text": "--user@example.com"})
+    await mirror.input({"type": "key", "action": "down", "key": "Tab", "code": "Tab"})
+
+    assert [method for method, _ in cdp.sent] == ["Input.insertText", "Input.dispatchKeyEvent"]
+    assert cdp.sent[0][1] == {"text": "--user@example.com"}

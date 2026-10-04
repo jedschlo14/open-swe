@@ -5,11 +5,13 @@ export interface KeyEventLike {
   ctrlKey: boolean
   shiftKey: boolean
   altKey: boolean
+  altGraph?: boolean
 }
 
 export type KeyPlan =
   | { kind: "ignore" }
   | { kind: "paste" }
+  | { kind: "text"; text: string }
   | {
       kind: "forward"
       key: string
@@ -26,6 +28,15 @@ export function isMacPlatform(): boolean {
 }
 
 const COPY_KEYS = new Set(["c", "x"])
+
+/**
+ * AltGr on Windows arrives as Ctrl+Alt and Option on a Mac as Alt, both of which the
+ * page would read as a shortcut and drop; the character they composed is sent as text.
+ */
+function composesText(event: KeyEventLike, mac: boolean): boolean {
+  if (event.altGraph) return true
+  return mac && event.altKey && !event.metaKey && !event.ctrlKey
+}
 
 /**
  * How a key event reaches the page. The page runs on Linux, so on a Mac ⌘ stands
@@ -49,6 +60,10 @@ export function planKey(
       copy: false,
     }
   }
+  if (event.key.length === 1 && composesText(event, mac))
+    return phase === "down"
+      ? { kind: "text", text: event.key }
+      : { kind: "ignore" }
   const underCommand = mac && event.metaKey
   if (underCommand && phase === "up") return { kind: "ignore" }
   return {

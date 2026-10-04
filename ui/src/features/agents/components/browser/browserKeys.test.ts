@@ -51,4 +51,22 @@ describe("planKey", () => {
       planKey(key({ key: "c", ctrlKey: true }), "up", false)
     ).toMatchObject({ copy: false })
   })
+
+  it("sends AltGr and Option characters as text instead of a shortcut", () => {
+    const altGr = key({
+      key: "@",
+      code: "KeyQ",
+      ctrlKey: true,
+      altKey: true,
+      altGraph: true,
+    })
+    expect(planKey(altGr, "down", false)).toEqual({ kind: "text", text: "@" })
+    expect(planKey(altGr, "up", false)).toEqual({ kind: "ignore" })
+    expect(
+      planKey(key({ key: "™", code: "Digit2", altKey: true }), "down", true)
+    ).toEqual({ kind: "text", text: "™" })
+    expect(
+      planKey(key({ key: "x", altKey: true }), "down", false)
+    ).toMatchObject({ kind: "forward", key: "x" })
+  })
 })

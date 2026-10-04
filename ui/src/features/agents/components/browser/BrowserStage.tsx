@@ -206,10 +206,26 @@ export function BrowserStage(props: BrowserStageProps) {
   ) => {
     if (!driving || event.nativeEvent.isComposing || event.keyCode === 229)
       return
-    const plan = planKey(event, phase, mac.current)
+    const plan = planKey(
+      {
+        key: event.key,
+        code: event.code,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        altGraph: event.getModifierState("AltGraph"),
+      },
+      phase,
+      mac.current
+    )
     if (plan.kind === "paste") return
     event.preventDefault()
     if (plan.kind === "ignore") return
+    if (plan.kind === "text") {
+      send({ type: "paste", text: plan.text })
+      return
+    }
     if (phase === "up") {
       held.current.delete(plan.code)
       send({ type: "key", action: "up", key: plan.key, code: plan.code })
