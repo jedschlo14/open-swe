@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import { agentsApi } from "@/features/agents/lib/api"
 import { parseFontCatalog } from "@/features/agents/components/browser/mirror/fontCatalog"
 import { MirrorPlayer } from "@/features/agents/components/browser/mirror/MirrorPlayer"
+import { ReplayGate } from "@/features/agents/components/browser/mirror/ReplayGate"
 import type {
   MirrorHit,
   MirrorViewport,
@@ -151,14 +152,21 @@ export function useBrowserLive(
     let retry: ReturnType<typeof setTimeout> | null = null
     let fontsTimer: ReturnType<typeof setTimeout> | null = null
     let frame = 0
+    let flushTimer: ReturnType<typeof setTimeout> | null = null
     let fontsReady = false
-    let queued: eventWithTime[] = []
+    const gate = new ReplayGate()
 
     const flush = () => {
       frame = 0
       if (!fontsReady) return
-      const events = queued
-      queued = []
+      const now = performance.now()
+      const events = gate.take(now)
+      const wait = gate.wait(now)
+      if (wait !== null && !flushTimer)
+        flushTimer = setTimeout(() => {
+          flushTimer = null
+          schedule()
+        }, wait)
       if (!events.length) return
       try {
         playerRef.current?.apply(events)
@@ -191,7 +199,7 @@ export function useBrowserLive(
     ) => {
       switch (message.type) {
         case "reset":
-          queued = []
+          gate.reset()
           player.reset()
           return
         case "page": {
@@ -224,7 +232,7 @@ export function useBrowserLive(
     const connect = async () => {
       setStatus("connecting")
       fontsReady = false
-      queued = []
+      gate.reset()
       playerRef.current?.destroy()
       playerRef.current = null
       try {
@@ -256,7 +264,7 @@ export function useBrowserLive(
           try {
             const message: unknown = JSON.parse(event.data)
             if (Array.isArray(message)) {
-              queued.push(...(message as eventWithTime[]))
+              gate.push(message as eventWithTime[], performance.now())
               schedule()
             } else if (isRecord(message)) {
               handleMessage(message, player, connection.url)
@@ -285,6 +293,7 @@ export function useBrowserLive(
       disposed = true
       if (retry) clearTimeout(retry)
       if (fontsTimer) clearTimeout(fontsTimer)
+      if (flushTimer) clearTimeout(flushTimer)
       if (frame) cancelAnimationFrame(frame)
       socketRef.current = null
       socket?.close()
