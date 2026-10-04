@@ -115,6 +115,7 @@ from agent.middleware import (
     SubdirAgentsReadMiddleware,
     ToolErrorMiddleware,
     ValidateImageReadsMiddleware,
+    VisualEvidenceMiddleware,
     WorkflowPushGuardMiddleware,
     WorkspaceSkillsMiddleware,
     check_message_queue_before_model,
@@ -1811,14 +1812,11 @@ async def build_agent(config: RunnableConfig, *, tool_surface: ToolSurface | Non
     # incident sweep, for one, has the reply tool taken away on purpose.
     reply_tool_offered = _registered_tool_name(slack_reply) in reserved_tool_names - excluded_tools
     dynamic_tool_middleware: DynamicToolMiddleware | None = None
+    browser_enabled = sandbox_file_downloads and not local_run and not cli_result_required
     integration_tool_groups: dict[str, IntegrationGroup | Sequence[Any]] = {
         "MCPs": mcp_tools,
         "Notion": notion_tools,
-        "Browser": (
-            browser_tools()
-            if sandbox_file_downloads and not local_run and not cli_result_required
-            else []
-        ),
+        "Browser": browser_tools() if browser_enabled else [],
     }
     if integration_tool_groups:
         candidate = DynamicToolMiddleware(
@@ -2045,6 +2043,7 @@ async def build_agent(config: RunnableConfig, *, tool_surface: ToolSurface | Non
                         max_delay=10.0,
                     ),
                     *([] if local_run else [PullRequestCreationGuardMiddleware()]),
+                    *([VisualEvidenceMiddleware()] if browser_enabled else []),
                     WorkflowPushGuardMiddleware(),
                     refresh_github_proxy_before_model,
                     *(

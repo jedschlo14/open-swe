@@ -1,0 +1,9 @@
+PR not created. This branch changes files a reviewer would see in a browser ({{ files }}), but the PR body has no before/after screenshots.
+
+Add them now, then call `open_pull_request` again with the returned Markdown in a two-column Before/After table:
+1. Load the Browser tools and start the app. If the full app needs services you can't run here (sign-in, a backend, real data), render the changed component on a temporary page or route with representative props instead.
+2. For `before`, check out the base branch's version of the changed files (`git checkout origin/<base> -- <files>`), load the page, and publish it with `browser_publish_screenshot` and `label: "before"`.
+3. Restore your version (`git checkout HEAD -- <files>`), reload the same page at the same viewport, and publish the `after` capture.
+4. Delete any temporary page or route and confirm `git status` is clean before you continue.
+
+Skip this only when the change has no visible effect, the page cannot be rendered here even in isolation, or it would show secrets or other people's data. Then add a line starting `Before/after screenshots omitted:` with the specific reason to the body and call `open_pull_request` again.

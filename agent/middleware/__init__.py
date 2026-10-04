@@ -30,6 +30,7 @@ _MIDDLEWARE_MODULES = {
     "task_retry_on": ".task_retry",
     "ToolErrorMiddleware": ".tool_error_handler",
     "ValidateImageReadsMiddleware": ".validate_image_reads",
+    "VisualEvidenceMiddleware": ".visual_evidence",
     "WorkflowPushGuardMiddleware": ".workflow_push_guard",
     "WorkspaceSkillsMiddleware": ".workspace_skills",
 }
@@ -54,6 +55,7 @@ __all__ = [
     "SubdirAgentsReadMiddleware",
     "ToolErrorMiddleware",
     "ValidateImageReadsMiddleware",
+    "VisualEvidenceMiddleware",
     "WorkflowPushGuardMiddleware",
     "WorkspaceSkillsMiddleware",
     "check_message_queue_before_model",
@@ -91,6 +93,7 @@ if TYPE_CHECKING:
     from agent.middleware.task_retry import task_on_failure, task_retry_on
     from agent.middleware.tool_error_handler import ToolErrorMiddleware
     from agent.middleware.validate_image_reads import ValidateImageReadsMiddleware
+    from agent.middleware.visual_evidence import VisualEvidenceMiddleware
     from agent.middleware.workflow_push_guard import WorkflowPushGuardMiddleware
     from agent.middleware.workspace_skills import WorkspaceSkillsMiddleware
 
