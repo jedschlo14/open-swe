@@ -55,8 +55,28 @@ async def take_control(thread_id: str, login: str) -> BrowserSession:
             "Took browser control before the agent's action settled",
             extra={"browser_session_id": session.session_id},
         )
+    await _discard_recording(taken)
     logger.info("Browser control taken", extra={"browser_session_id": session.session_id})
     return await store.finish_handoff(session.session_id) or taken
+
+
+async def _discard_recording(session: BrowserSession) -> None:
+    """End any recording before a person's input is let through, so it is never captured."""
+    if session.sandbox_id is None:
+        return
+    try:
+        async with engine.connected(session.sandbox_id) as sandbox:
+            if await engine.discard_recording(sandbox, session):
+                logger.info(
+                    "Discarded the recording for a takeover",
+                    extra={"browser_session_id": session.session_id},
+                )
+    except engine.EngineCommandError, engine.SandboxLostError:
+        logger.warning(
+            "Could not discard the recording for a takeover",
+            exc_info=True,
+            extra={"browser_session_id": session.session_id},
+        )
 
 
 def _text(data: dict[str, JsonValue], key: str) -> str | None:

@@ -1,4 +1,4 @@
-"""Publishes browser screenshots as pull request evidence on a repository evidence branch.
+"""Publishes browser screenshots and recordings as pull request evidence on an evidence branch.
 
 GitHub has no API for uploading images to a pull request, and a link that works
 without signing in to GitHub outlives the reader's repository access. So
@@ -33,10 +33,11 @@ _DAY_PATH = re.compile(rf"^{_ROOT}/(\d{{4}}-\d{{2}}-\d{{2}})/")
 _MAX_ATTEMPTS = 4
 
 Label = Literal["before", "after", "other"]
+RecordingLabel = Literal["recording"]
 
 
 class EvidenceError(RuntimeError):
-    """The screenshot could not be published."""
+    """The image could not be published."""
 
 
 class PublishedEvidence(BaseModel):
@@ -117,7 +118,7 @@ async def publish_image(
     full_name: str,
     *,
     thread_id: str,
-    label: Label,
+    label: Label | RecordingLabel,
     caption: str,
     data: bytes,
     extension: str,
@@ -125,7 +126,7 @@ async def publish_image(
 ) -> PublishedEvidence:
     """Add ``data`` to the repository's evidence branch and return how to embed it."""
     if not data or len(data) > MAX_IMAGE_BYTES:
-        raise EvidenceError("The screenshot is empty or larger than 5 MB.")
+        raise EvidenceError("The image is empty or larger than 5 MB.")
     moment = now or datetime.now(UTC)
     path = evidence_path(thread_id, label, data, moment, extension)
     blob = await _call(
@@ -135,7 +136,7 @@ async def publish_image(
         json={"content": base64.b64encode(data).decode(), "encoding": "base64"},
     )
     if blob.status_code != 201:
-        raise await _fail(blob, "store the screenshot")
+        raise await _fail(blob, "store the image")
     entries: list[dict[str, str | None]] = [
         {"path": path, "mode": "100644", "type": "blob", "sha": blob.json()["sha"]}
     ]

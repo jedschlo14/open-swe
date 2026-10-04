@@ -14,7 +14,4 @@ for secrets or credentials. Take a screenshot for applicable UI-facing changes w
 tools and share it with the user in the final delivery without committing it.
 
 Never use download links as pull request evidence: anyone holding the link can open it, and it
-outlives the reader's repository access. For UI-bug-fix and UI-change PRs, capture a before/after
-pair with `browser_publish_screenshot` (before the change, then after it) and embed the Markdown it
-returns. If it fails or the page shows anything private, leave the evidence out and say in the
-description that it was omitted and why.
+outlives the reader's repository access.
