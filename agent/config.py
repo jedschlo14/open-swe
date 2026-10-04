@@ -459,7 +459,8 @@ ENV.var("RUNLOOP_API_KEY", "Runloop API key.", secret=True)
 ENV.var(
     "BROWSER_TURN_URLS",
     "Comma-separated TURN server URLs (turn:/turns:) relaying the thread browser's live view "
-    "between the sandbox and the dashboard; unset disables the live view.",
+    "between the sandbox and the dashboard. Unset, the live view works only for a browser on the "
+    "server's own machine (localhost), carried over the sandbox tunnel.",
 )
 ENV.var(
     "BROWSER_TURN_SECRET",

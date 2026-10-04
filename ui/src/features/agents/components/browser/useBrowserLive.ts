@@ -110,8 +110,9 @@ function iceServersOf(value: unknown): RTCIceServer[] {
  * Plays a thread browser's neko stream: WebRTC video into a `<video>` element, the
  * cursor image from its data channel, and the controller's input back over the
  * dashboard socket. The server decides who may send input; this hook only
- * transports it. Media is relayed through TURN only, so the sandbox never learns
- * the viewer's address.
+ * transports it. Media goes through a TURN relay when the server has one, with the
+ * sandbox never learning the viewer's address, or else through the server's
+ * loopback port for a viewer on the same machine.
  */
 export function useBrowserLive(
   threadId: string,
@@ -128,6 +129,7 @@ export function useBrowserLive(
   const [page, setPage] = useState<BrowserPage | null>(null)
   const [geometry, setGeometry] = useState<BrowserGeometry | null>(null)
   const [attempt, setAttempt] = useState(0)
+  const [detail, setDetail] = useState<string | null>(null)
 
   const socketRef = useRef<WebSocket | null>(null)
   const geometryRef = useRef<BrowserGeometry | null>(null)
@@ -269,6 +271,7 @@ export function useBrowserLive(
 
     const connect = () => {
       setStatus("connecting")
+      setDetail(null)
       agentsApi
         .connectBrowserLive(threadId)
         .then((connection) => {
@@ -305,11 +308,14 @@ export function useBrowserLive(
               retry = setTimeout(connect, RETRY_DELAY_MS)
               return
             }
+            if (event.code !== 1000 && event.reason) setDetail(event.reason)
             setStatus(event.code === 1000 ? "ended" : "error")
           }
         })
-        .catch(() => {
-          if (!disposed) setStatus("error")
+        .catch((error: unknown) => {
+          if (disposed) return
+          if (error instanceof Error) setDetail(error.message)
+          setStatus("error")
         })
     }
 
@@ -330,6 +336,7 @@ export function useBrowserLive(
     attachVideo,
     send,
     cursor,
+    detail: sessionId ? detail : null,
     page: sessionId ? page : null,
     geometry: sessionId ? geometry : null,
     status: !sessionId ? "idle" : unsupported ? "unsupported" : status,

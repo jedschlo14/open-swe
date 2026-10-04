@@ -7,10 +7,10 @@ network rather than an open one. Every command enters that namespace, so a
 daemon that has to be respawned is respawned inside it too.
 
 Chromium runs headed on a private virtual display served by neko (see
-``agent.browser.neko``) when the sandbox image carries it and a TURN relay is
-configured, so the live view streams real video over WebRTC and native widgets
-such as ``<select>`` popups appear. Otherwise it runs headless and the session
-simply has no live view; the agent is unaffected.
+``agent.browser.neko``), which a session installs in the sandbox on first use, so
+the live view streams real video over WebRTC and native widgets such as
+``<select>`` popups appear. If neko cannot be installed it runs headless and the
+session simply has no live view; the agent is unaffected.
 
 Every call goes through ``sandbox.run`` with the server's own credentials; the
 browser's DevTools port stays on the namespace's loopback.
@@ -253,8 +253,8 @@ async def _start_helper(
 async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int | None:
     """Launch the session's isolated browser; returns neko's sandbox-loopback port.
 
-    ``None`` means the browser has no live view (neko is not in the sandbox image or
-    no TURN relay is configured), so it runs headless and only the agent uses it.
+    ``None`` means the browser has no live view (neko could not be installed), so it
+    runs headless and only the agent uses it.
     """
     await check_engine(sandbox)
     live = await _live_view_available(sandbox, session)
@@ -262,13 +262,7 @@ async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int | None:
     port: int | None = None
     if live:
         try:
-            port = await neko.start(
-                sandbox,
-                session,
-                session_dir(session),
-                neko.screen_for(VIEWPORT_WIDTH, VIEWPORT_HEIGHT, RENDER_SCALE),
-                turn.mint(session.session_id, ttl_seconds=turn.BACKEND_TTL_SECONDS),
-            )
+            port = await _start_live_view(sandbox, session)
         except neko.NekoError as exc:
             raise EngineCommandError(str(exc)) from exc
     await run_command(
@@ -279,20 +273,40 @@ async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int | None:
     return port
 
 
+async def _start_live_view(sandbox: AsyncSandbox, session: BrowserSession) -> int:
+    """Start the display and neko, plus the UDP bridge when no TURN relay carries the media."""
+    backend = (
+        turn.mint(session.session_id, ttl_seconds=turn.BACKEND_TTL_SECONDS)
+        if neko.media_mode() == "relay"
+        else None
+    )
+    port = await neko.start(
+        sandbox,
+        session,
+        session_dir(session),
+        neko.screen_for(VIEWPORT_WIDTH, VIEWPORT_HEIGHT, RENDER_SCALE),
+        backend,
+    )
+    if backend is None:
+        await sandbox.write(f"{session_dir(session)}/{neko.BRIDGE_SCRIPT}", neko.bridge_script())
+        await _start_helper(
+            sandbox,
+            session,
+            "bridge",
+            neko.BRIDGE_SCRIPT,
+            [str(neko.bridge_port(port)), str(port + 2)],
+        )
+    return port
+
+
 async def _live_view_available(sandbox: AsyncSandbox, session: BrowserSession) -> bool:
-    if not turn.configured():
-        logger.info(
-            "No TURN relay is configured; the browser runs without a live view",
-            extra={"browser_session_id": session.session_id},
-        )
-        return False
-    if not await neko.installed(sandbox):
-        logger.info(
-            "neko is not in the sandbox image; the browser runs without a live view",
-            extra={"browser_session_id": session.session_id},
-        )
-        return False
-    return True
+    if await neko.ensure_installed(sandbox):
+        return True
+    logger.info(
+        "neko could not be installed in the sandbox; the browser runs without a live view",
+        extra={"browser_session_id": session.session_id},
+    )
+    return False
 
 
 def clamp_viewport(width: int, height: int) -> tuple[int, int]:

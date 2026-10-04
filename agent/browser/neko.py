@@ -16,9 +16,12 @@ so no process other than this server can mint it without reading the sandbox.
 import hashlib
 import hmac
 import json
+import logging
 import shlex
 from functools import cache
 from importlib import resources
+from textwrap import dedent
+from typing import Literal
 
 from langsmith.sandbox import AsyncSandbox
 
@@ -26,11 +29,21 @@ from agent.browser import turn
 from agent.browser.models import BrowserSession
 from agent.config import ENV
 
+logger = logging.getLogger(__name__)
+
+type MediaMode = Literal["relay", "local"]
+
+LOCAL_ONLY_MESSAGE = (
+    "The live view needs a TURN relay (BROWSER_TURN_URLS) unless you open Open SWE on localhost"
+)
 NEKO_ROOT = "/opt/neko"
 NEKO_BINARY = f"{NEKO_ROOT}/bin/neko"
 SCREEN_RATE = 30
 _START_TIMEOUT_SECONDS = 60
 _PROBE_TIMEOUT_SECONDS = 30
+_INSTALL_TIMEOUT_SECONDS = 900
+INSTALL_SCRIPT = "install_live_view.sh"
+BRIDGE_SCRIPT = "udp_bridge.py"
 
 _INSTALLED_CHECK = (
     f"test -x {NEKO_BINARY} && command -v Xorg >/dev/null && command -v openbox >/dev/null"
@@ -46,6 +59,21 @@ class NekoError(RuntimeError):
 @cache
 def _resource(name: str) -> str:
     return resources.files("agent.resources").joinpath("browser", name).read_text()
+
+
+def media_mode() -> MediaMode:
+    """How video reaches the viewer: through a TURN relay when one is configured, else a local bridge.
+
+    The local bridge carries WebRTC's UDP over the sandbox tunnel the server already
+    holds, so it needs no relay and no public address, but only a viewer on the
+    server's own machine can use it. A session's mode is fixed when it launches.
+    """
+    return "relay" if turn.configured() else "local"
+
+
+def bridge_port(stream_port: int) -> int:
+    """The sandbox-loopback port of a local-mode session's UDP bridge, next to neko's."""
+    return stream_port + 1
 
 
 def display_name(session: BrowserSession) -> str:
@@ -83,13 +111,44 @@ async def installed(sandbox: AsyncSandbox) -> bool:
     return result.exit_code == 0
 
 
+async def ensure_installed(sandbox: AsyncSandbox) -> bool:
+    """Whether the sandbox can show the browser, installing neko and its dependencies if absent."""
+    if await installed(sandbox):
+        return True
+    logger.info("Installing neko and its dependencies in the sandbox")
+    directory = "/tmp/open-swe-live-view"
+    try:
+        await sandbox.run(f"mkdir -p {directory}", timeout=_PROBE_TIMEOUT_SECONDS)
+        await sandbox.write(f"{directory}/{INSTALL_SCRIPT}", _resource(INSTALL_SCRIPT))
+        result = await sandbox.run(
+            f"bash {directory}/{INSTALL_SCRIPT}", timeout=_INSTALL_TIMEOUT_SECONDS
+        )
+    except Exception:
+        logger.warning("Installing the live view dependencies failed", exc_info=True)
+        return False
+    if result.exit_code != 0:
+        logger.warning(
+            "Installing the live view dependencies failed",
+            extra={"exit_code": result.exit_code, "stderr": result.stderr[-500:]},
+        )
+        return False
+    return await installed(sandbox)
+
+
+def bridge_script() -> str:
+    return _resource(BRIDGE_SCRIPT)
+
+
 def environment(
-    session: BrowserSession, port: int, size: tuple[int, int], backend: turn.IceServer
+    session: BrowserSession,
+    port: int,
+    size: tuple[int, int],
+    backend: turn.IceServer | None,
 ) -> dict[str, str]:
-    """The ``NEKO_*`` configuration for one session's server."""
-    ice = json.dumps([backend.as_json()])
+    """The ``NEKO_*`` configuration for one session's server; ``backend`` is set in relay mode."""
+    ice = json.dumps([backend.as_json()] if backend is not None else [])
     width, height = size
-    return {
+    env = {
         "NEKO_SERVER_BIND": f"127.0.0.1:{port}",
         "NEKO_SERVER_METRICS": "false",
         "NEKO_DESKTOP_DISPLAY": display_name(session),
@@ -109,17 +168,48 @@ def environment(
         "NEKO_WEBRTC_NAT1TO1": "127.0.0.1",
         "NEKO_PLUGINS_ENABLED": "false",
     }
+    if backend is None:
+        env |= {
+            "NEKO_WEBRTC_ICELITE": "true",
+            "NEKO_WEBRTC_UDPMUX": str(port + 2),
+        }
+    return env
+
+
+_FREE_PORTS = dedent(
+    """
+    import socket
+
+    TCP, UDP = socket.SOCK_STREAM, socket.SOCK_DGRAM
+    for _ in range(200):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        held = []
+        try:
+            for offset, kind in ((0, TCP), (1, TCP), (2, UDP)):
+                held.append(socket.socket(socket.AF_INET, kind))
+                held[-1].bind(("0.0.0.0", port + offset))
+        except OSError:
+            continue
+        finally:
+            for sock in held:
+                sock.close()
+        print(port)
+        break
+    """
+)
 
 
 async def _free_port(sandbox: AsyncSandbox) -> int:
+    """A port whose two successors are free too: neko's API, the UDP bridge, and neko's UDP port."""
     result = await sandbox.run(
-        'python3 -c \'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0));'
-        " print(s.getsockname()[1])'",
-        timeout=_PROBE_TIMEOUT_SECONDS,
+        f"python3 -c {shlex.quote(_FREE_PORTS)}", timeout=_PROBE_TIMEOUT_SECONDS
     )
     port = result.stdout.strip()
     if result.exit_code != 0 or not port.isdigit():
-        raise NekoError("could not find a free port for the live view")
+        raise NekoError("could not find free ports for the live view")
     return int(port)
 
 
@@ -128,7 +218,7 @@ async def start(
     session: BrowserSession,
     directory: str,
     size: tuple[int, int],
-    backend: turn.IceServer,
+    backend: turn.IceServer | None,
 ) -> int:
     """Start the session's display, window manager, and neko; return neko's sandbox-loopback port."""
     port = await _free_port(sandbox)
@@ -167,7 +257,7 @@ def stop_command(session: BrowserSession, directory: str) -> str:
     folder = shlex.quote(directory)
     lock = shlex.quote(f"/tmp/.X{display_name(session).lstrip(':')}-lock")
     return (
-        f"for pid in {folder}/neko.pid {folder}/openbox.pid {folder}/xorg.pid;"
+        f"for pid in {folder}/bridge.pid {folder}/neko.pid {folder}/openbox.pid {folder}/xorg.pid;"
         ' do [ -f "$pid" ] && kill $(cat "$pid") 2>/dev/null; done;'
         f" rm -f {shlex.quote(x_socket(session))} {lock};"
     )

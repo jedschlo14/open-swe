@@ -171,6 +171,7 @@ export function BrowserPanel(props: { threadId: string }) {
     cursor,
     page,
     geometry,
+    detail,
     status: liveStatus,
     role,
   } = useBrowserLive(
@@ -376,6 +377,7 @@ export function BrowserPanel(props: { threadId: string }) {
           attachVideo={attachVideo}
           containerRef={stageRef}
           geometry={geometry}
+          detail={detail}
           cursor={cursor}
           status={liveStatus}
           owner={owner}
@@ -397,9 +399,8 @@ export function BrowserPanel(props: { threadId: string }) {
           <Globe2 className="size-5" />
           <p>The live view isn't available for this browser.</p>
           <p className="max-w-xs text-xs">
-            Showing the browser needs neko in the sandbox image and a TURN
-            relay (BROWSER_TURN_URLS) configured on the server. The agent can
-            still use it.
+            The sandbox couldn't install what the live view needs (neko, Xorg,
+            and GStreamer). The agent can still use the browser.
           </p>
         </Centered>
       )}

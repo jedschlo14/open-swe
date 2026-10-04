@@ -27,6 +27,7 @@ interface BrowserStageProps {
   attachVideo: (node: HTMLVideoElement | null) => void
   containerRef: (node: HTMLDivElement | null) => void
   geometry: BrowserGeometry | null
+  detail: string | null
   cursor: string
   status: BrowserLiveStatus
   owner: StageOwner
@@ -292,8 +293,8 @@ export function BrowserStage(props: BrowserStageProps) {
         </span>
       ) : null}
       {status === "error" ? (
-        <span className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
-          The live view disconnected.
+        <span className="absolute inset-0 flex items-center justify-center px-6 text-center text-xs text-muted-foreground">
+          {props.detail ?? "The live view disconnected."}
         </span>
       ) : null}
       {status === "unsupported" ? (

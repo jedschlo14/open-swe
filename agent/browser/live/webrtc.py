@@ -1,9 +1,12 @@
 """Relays a thread browser's live view, served by neko over WebRTC, to one dashboard viewer.
 
 The viewer's browser and neko exchange video, and neko sends the cursor image, over a
-WebRTC connection that goes through a TURN relay. Everything else passes through
-this socket: signaling, page state, and the controller's input. The viewer never
-talks to neko, and the TURN credential it receives is minted for that connection.
+WebRTC connection. With a TURN relay configured it goes through the relay, and the
+TURN credential the viewer receives is minted for that connection. Without one it
+goes through a loopback UDP port on this server and the sandbox tunnel (see
+``local_media``), for a viewer on this machine. Everything else passes through this
+socket: signaling, page state, and the controller's input. The viewer never talks to
+neko.
 
 Access is checked on connect and rechecked while the view is open. Signaling is
 open to any viewer; input, resizing, and toolbar actions pass only for a viewer who
@@ -15,6 +18,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack
 
 import aiohttp
 from fastapi import WebSocket, WebSocketDisconnect
@@ -22,7 +26,7 @@ from langsmith.sandbox import AsyncSandbox
 from pydantic import JsonValue
 
 from agent.browser import engine, manager, neko, turn
-from agent.browser.live import messages
+from agent.browser.live import local_media, messages
 from agent.browser.live.actions import PersonActions
 from agent.browser.live.gate import Authorizer, ControlGate, ViewportSync
 from agent.browser.live.keysyms import keysym_for
@@ -45,24 +49,51 @@ _FIRST_UNMAPPED_CODE_POINT = 0x80
 type Outbound = Callable[[Mapping[str, JsonValue]], None]
 
 
-def to_viewer(event: NekoEvent, viewer_ice: turn.IceServer | None) -> dict[str, JsonValue] | None:
-    """What neko's event means to the dashboard viewer, or ``None`` when it is not for them."""
+def to_viewer(
+    event: NekoEvent, viewer_ice: turn.IceServer | None, local_port: int | None = None
+) -> dict[str, JsonValue] | None:
+    """What neko's event means to the dashboard viewer, or ``None`` when it is not for them.
+
+    With ``viewer_ice`` the viewer gets only relay candidates and its own TURN credential.
+    With ``local_port`` it gets neko's candidates rewritten to the loopback port the server
+    listens on for its media. With neither, signaling is not offered.
+    """
     kind, payload = event.get("event"), event.get("payload")
     if not isinstance(payload, dict):
         return None
-    if kind == "signal/provide" and isinstance(payload.get("sdp"), str) and viewer_ice is not None:
-        return {
-            "type": "signal",
-            "event": "provide",
-            "sdp": payload["sdp"],
-            "iceServers": [viewer_ice.as_json()],
-            "relayOnly": True,
-        }
-    if kind == "signal/restart" and isinstance(payload.get("sdp"), str):
-        return {"type": "signal", "event": "restart", "sdp": payload["sdp"]}
+    sdp = payload.get("sdp")
+    if kind == "signal/provide" and isinstance(sdp, str):
+        if viewer_ice is not None:
+            return {
+                "type": "signal",
+                "event": "provide",
+                "sdp": sdp,
+                "iceServers": [viewer_ice.as_json()],
+                "relayOnly": True,
+            }
+        if local_port is not None:
+            return {
+                "type": "signal",
+                "event": "provide",
+                "sdp": local_media.localize_sdp(sdp, local_port),
+                "iceServers": [],
+                "relayOnly": False,
+            }
+        return None
+    if kind == "signal/restart" and isinstance(sdp, str):
+        if viewer_ice is None and local_port is not None:
+            sdp = local_media.localize_sdp(sdp, local_port)
+        return {"type": "signal", "event": "restart", "sdp": sdp}
     if kind == "signal/candidate":
         candidate = payload.get("candidate")
-        if not isinstance(candidate, str) or " typ relay" not in candidate:
+        if not isinstance(candidate, str):
+            return None
+        if viewer_ice is not None:
+            if " typ relay" not in candidate:
+                return None
+        elif local_port is not None:
+            candidate = local_media.localize_candidate(candidate, local_port) or ""
+        if not candidate:
             return None
         return {
             "type": "signal",
@@ -194,6 +225,7 @@ class _Viewer:
         authorize: Authorizer,
         sandbox: AsyncSandbox,
         api: NekoApi,
+        media: local_media.LocalMedia | None,
     ) -> None:
         self._websocket = websocket
         self._session = session
@@ -205,7 +237,12 @@ class _Viewer:
         self._screen = neko.screen_for(
             engine.VIEWPORT_WIDTH, engine.VIEWPORT_HEIGHT, engine.RENDER_SCALE
         )
-        self._ice = turn.mint(session.session_id, ttl_seconds=turn.VIEWER_TTL_SECONDS)
+        self._ice = (
+            turn.mint(session.session_id, ttl_seconds=turn.VIEWER_TTL_SECONDS)
+            if media is None
+            else None
+        )
+        self._local_port = media.port if media is not None else None
         self._wheel = WheelAccumulator()
         self._queue: asyncio.Queue[Callable[[], Awaitable[None]]] = asyncio.Queue()
         self._gate = (
@@ -229,7 +266,7 @@ class _Viewer:
             if event.get("event") == "system/disconnect":
                 await self._websocket.close(code=1011, reason="Live view disconnected")
                 return
-            outgoing = to_viewer(event, self._ice)
+            outgoing = to_viewer(event, self._ice, self._local_port)
             if outgoing is not None:
                 if outgoing["type"] == "screen":
                     width, height = outgoing["width"], outgoing["height"]
@@ -352,12 +389,27 @@ class _Viewer:
             task.result()
 
 
+def _mode_problem(websocket: WebSocket) -> str | None:
+    """Why this viewer cannot be served in the session's media mode, or ``None`` if it can."""
+    if neko.media_mode() == "relay":
+        return None
+    if local_media.is_local_viewer(
+        websocket.client.host if websocket.client else None, websocket.headers
+    ):
+        return None
+    return neko.LOCAL_ONLY_MESSAGE
+
+
 async def relay(
     websocket: WebSocket, session: BrowserSession, ticket: BrowserTicket, authorize: Authorizer
 ) -> None:
     """Serve one accepted live-view connection until either side ends it."""
-    if session.sandbox_id is None or session.stream_port is None or not turn.configured():
+    if session.sandbox_id is None or session.stream_port is None:
         await websocket.close(code=1011, reason="The browser has no live view")
+        return
+    problem = _mode_problem(websocket)
+    if problem is not None:
+        await websocket.close(code=1008, reason=problem)
         return
     try:
         await asyncio.wait_for(_SLOTS.acquire(), timeout=0.01)
@@ -369,14 +421,26 @@ async def relay(
     client = None
     try:
         client, sandbox = await connect_async_langsmith_sandbox(session.sandbox_id)
-        async with await sandbox.tunnel(remote_port=session.stream_port, local_port=0) as tunnel:
-            async with NekoApi(session, tunnel.local_port) as api:
-                await api.join(ticket.role)
-                logger.info(
-                    "Browser live view opened",
-                    extra={"browser_session_id": session.session_id, "browser_role": ticket.role},
-                )
-                await _Viewer(websocket, session, ticket, authorize, sandbox, api).serve()
+        async with AsyncExitStack() as stack:
+            tunnel = await stack.enter_async_context(
+                await sandbox.tunnel(remote_port=session.stream_port, local_port=0)
+            )
+            media = (
+                await stack.enter_async_context(local_media.LocalMedia(sandbox, session))
+                if neko.media_mode() == "local"
+                else None
+            )
+            api = await stack.enter_async_context(NekoApi(session, tunnel.local_port))
+            await api.join(ticket.role)
+            logger.info(
+                "Browser live view opened",
+                extra={
+                    "browser_session_id": session.session_id,
+                    "browser_role": ticket.role,
+                    "browser_media": "local" if media is not None else "relay",
+                },
+            )
+            await _Viewer(websocket, session, ticket, authorize, sandbox, api, media).serve()
         await websocket.close(code=1000, reason="The browser session ended")
     except WebSocketDisconnect:
         logger.debug(

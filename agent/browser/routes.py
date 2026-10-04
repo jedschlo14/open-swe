@@ -9,11 +9,12 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from fastapi import APIRouter, HTTPException, Response, WebSocket
+from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
 from pydantic import BaseModel, ConfigDict, JsonValue
 from pydantic.alias_generators import to_camel
 
-from agent.browser import lease, live, manager, store
+from agent.browser import lease, live, manager, neko, store
+from agent.browser.live import local_media
 from agent.browser.models import BrowserSession, BrowserSessionView
 from agent.dashboard.deps import SESSION_DEP
 from agent.dashboard.oauth import (
@@ -157,7 +158,7 @@ def _live_url(thread_id: str) -> str:
 
 @router.post("/threads/{thread_id}/browser/live/connect")
 async def api_browser_live_connect(
-    thread_id: str, response: Response, session: dict[str, Any] = SESSION_DEP
+    thread_id: str, request: Request, response: Response, session: dict[str, Any] = SESSION_DEP
 ) -> BrowserLiveConnection:
     """Issue a one-minute ticket for the live view; readers watch, writers may later control."""
     metadata = await _readable(thread_id, session)
@@ -166,6 +167,10 @@ async def api_browser_live_connect(
         raise HTTPException(409, "the browser is not running")
     if not current.live_view:
         raise HTTPException(409, "this browser has no live view")
+    if neko.media_mode() == "local" and not local_media.is_local_viewer(
+        request.client.host if request.client else None, request.headers
+    ):
+        raise HTTPException(409, neko.LOCAL_ONLY_MESSAGE)
     role = _role(metadata, session["sub"], session.get("email"))
     response.headers["Cache-Control"] = "no-store"
     return BrowserLiveConnection(
