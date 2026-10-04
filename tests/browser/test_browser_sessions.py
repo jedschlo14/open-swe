@@ -17,7 +17,9 @@ from fastapi import HTTPException
 from pydantic import JsonValue
 from sqlalchemy import text
 
-from agent.browser import broker, engine, lease, live, manager, routes, store
+from agent.browser import broker, engine, lease, manager, routes, store
+from agent.browser.live import gate as live_gate
+from agent.browser.live import messages
 from agent.browser.models import BrowserSession
 from agent.browser.ops import ClickOp, NavigateOp, SnapshotOp
 from agent.database import postgres
@@ -204,11 +206,29 @@ async def test_an_admin_can_watch_a_private_thread_but_not_start_its_browser(
     ensure.assert_not_awaited()
 
 
-def test_a_view_only_viewer_cannot_send_input_to_the_browser() -> None:
-    click = {"type": "input_mouse", "eventType": "mousePressed", "x": 4, "y": 4}
+def test_live_view_messages_are_validated_at_the_edge() -> None:
+    assert messages.parse(json.dumps({"type": "mouse", "action": "down", "x": -5, "y": 1})) is None
+    assert (
+        messages.parse(json.dumps({"type": "key", "action": "down", "key": "a" * 40, "code": "A"}))
+        is None
+    )
+    assert messages.parse(json.dumps({"type": "eval", "script": "alert(1)"})) is None
+    resize = messages.parse(json.dumps({"type": "resize", "width": 100, "height": 9000}))
+    assert isinstance(resize, messages.ResizeMessage)
+    assert resize.size == (engine.MIN_VIEWPORT[0], engine.MAX_VIEWPORT[1])
 
-    assert live._viewer_message(json.dumps(click)) is None
-    assert live._viewer_message(json.dumps({"type": "ack", "seq": 7})) == {"type": "ack", "seq": 7}
+
+async def test_a_viewer_resizes_the_page_only_while_nobody_else_holds_it(
+    sandbox: Sandbox,
+) -> None:
+    await broker.execute(THREAD, NavigateOp(url="http://localhost:3000/"), workspace_slug=None)
+    session = await store.active(THREAD)
+    assert session is not None
+    alice = live_gate.ControlGate(session, "alice", AsyncMock(return_value="control"))
+
+    assert await alice.allows_resize()
+    await lease.take_control(THREAD, "bob")
+    assert not await alice.allows_resize()
 
 
 async def test_a_takeover_fences_out_the_agent_until_the_person_hands_back(
@@ -217,7 +237,7 @@ async def test_a_takeover_fences_out_the_agent_until_the_person_hands_back(
     await broker.execute(THREAD, NavigateOp(url="http://localhost:3000/"), workspace_slug=None)
     await broker.execute(THREAD, SnapshotOp(), workspace_slug=None)
     taken = await lease.take_control(THREAD, "alice")
-    gate = live._ControlGate(taken, "alice", AsyncMock(return_value="control"))
+    gate = live_gate.ControlGate(taken, "alice", AsyncMock(return_value="control"))
 
     blocked = await broker.execute(THREAD, ClickOp(ref="e1"), workspace_slug=None)
     assert blocked.status == "user_in_control"
