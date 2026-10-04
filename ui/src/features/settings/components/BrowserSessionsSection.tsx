@@ -60,7 +60,7 @@ export function BrowserSessionsSection({ scope }: { scope: SettingsScope }) {
   return (
     <SettingsSection
       title="Browser sessions"
-      description="Each cloud thread can run one headless browser for checking the app it builds. It reaches only the thread's own sandbox servers and the endpoints approved here; actions on approved external endpoints still need a person's confirmation."
+      description="Each cloud thread can run one headless browser for checking the app it builds. It reaches only the thread's own sandbox servers and the endpoints approved here; clicking a sensitive-looking element on an approved external endpoint still needs a person's confirmation."
     >
       <div className="divide-y divide-border">
         <TierRow

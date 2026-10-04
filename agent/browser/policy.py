@@ -16,10 +16,8 @@ from agent.browser.models import PageRef
 from agent.browser.ops import (
     BrowserOp,
     ClickOp,
-    DialogOp,
     FillOp,
     NavigateOp,
-    PressOp,
     SelectOp,
     ref_name,
 )
@@ -125,10 +123,7 @@ def navigation(op: NavigateOp, approved_endpoints: Sequence[str]) -> Decision:
     if target.loopback:
         return Allow(endpoints=[*loopback_endpoints(target.port), *extra])
     if target.key in approved_endpoints:
-        return Confirm(
-            reason=f"opening {target.host}, an external endpoint an admin approved",
-            endpoints=extra,
-        )
+        return Allow(endpoints=extra)
     return Refuse(
         reason=(
             f"{target.host} is not allowed. The browser reaches only this sandbox's own "
@@ -142,24 +137,21 @@ def action(
 ) -> Decision:
     """Whether a page action may run now, needs a person's confirmation, or cannot run.
 
+    Only a click on a sensitive-looking element of an external page waits for a person.
     ``target_label`` names the element under a coordinate click, read by the executor.
     """
     page = endpoint_of(page_url)
     external = page is not None and not page.loopback
-    if isinstance(op, DialogOp):
-        return Confirm(reason="accepting a page dialog") if op.accept else Allow()
-    if not isinstance(op, ClickOp | FillOp | SelectOp | PressOp):
+    if not isinstance(op, ClickOp):
+        if isinstance(op, FillOp | SelectOp) and ref_name(op.ref) not in refs:
+            return Refuse(reason=f"{op.ref} is not in the latest snapshot; take a new snapshot.")
         return Allow()
     label = target_label
-    if isinstance(op, ClickOp | FillOp | SelectOp) and op.ref is not None:
+    if op.ref is not None:
         ref = refs.get(ref_name(op.ref))
         if ref is None:
             return Refuse(reason=f"{op.ref} is not in the latest snapshot; take a new snapshot.")
         label = ref.name
-    if external and not isinstance(op, FillOp):
-        return Confirm(reason=f"acting on {page.host if page else 'an external page'}")
-    if isinstance(op, ClickOp) and label is not None and _SENSITIVE_WORDS.search(label):
+    if external and label is not None and _SENSITIVE_WORDS.search(label):
         return Confirm(reason=f'clicking "{label[:80]}"')
-    if isinstance(op, ClickOp) and label is None:
-        return Confirm(reason="clicking an element the executor could not identify")
     return Allow()

@@ -32,6 +32,7 @@ class FakeEngine:
         self.launches = 0
         self.closes = 0
         self.commands: list[list[str]] = []
+        self.page_url = "http://localhost:3000/settings"
         self.on_command: Callable[[list[str]], Awaitable[None]] | None = None
 
     @asynccontextmanager
@@ -53,7 +54,7 @@ class FakeEngine:
         if self.on_command is not None:
             await self.on_command(args)
         if args[0] == "get":
-            return {"url": "http://localhost:3000/settings", "title": "Settings"}
+            return {"url": self.page_url, "title": "Settings"}
         if args[0] == "snapshot":
             return {"refs": {"e1": {"role": "button", "name": "Delete account"}}}
         return {}
@@ -137,10 +138,27 @@ async def test_an_idle_session_is_stopped_by_the_sweep(sandbox: Sandbox) -> None
     assert sandbox.engine.closes == 1
 
 
-async def test_a_sensitive_click_waits_for_one_approval_from_a_thread_writer(
+async def test_a_sensitive_click_in_the_sandbox_needs_no_approval(sandbox: Sandbox) -> None:
+    await broker.execute(THREAD, NavigateOp(url="http://localhost:3000/"), workspace_slug=None)
+    await broker.execute(THREAD, SnapshotOp(), workspace_slug=None)
+
+    done = await broker.execute(THREAD, ClickOp(ref="e1"), workspace_slug=None)
+
+    assert done.status == "ok"
+    assert ["click", "@e1"] in sandbox.engine.commands
+
+
+async def test_a_sensitive_click_on_an_external_page_waits_for_one_approval_from_a_thread_writer(
     sandbox: Sandbox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await broker.execute(THREAD, NavigateOp(url="http://localhost:3000/"), workspace_slug=None)
+    monkeypatch.setattr(
+        manager, "_session_settings", AsyncMock(return_value=(3600, ["staging.example.dev:443"]))
+    )
+    sandbox.engine.page_url = "https://staging.example.dev/settings"
+    opened = await broker.execute(
+        THREAD, NavigateOp(url="https://staging.example.dev/"), workspace_slug=None
+    )
+    assert opened.status == "ok"
     await broker.execute(THREAD, SnapshotOp(), workspace_slug=None)
     click = ClickOp(ref="e1")
 

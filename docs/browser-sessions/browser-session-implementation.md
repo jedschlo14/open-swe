@@ -12,7 +12,7 @@ Agent browser tools and the dashboard use the same page through an authenticated
 
 A sandbox-wide allowlist would also cut off git, package installs, and the app's own backend, so containment is per browser instead. Each session's browser runs in its own network namespace that has only loopback. Its only way out is an egress proxy that listens on that loopback, connects from the sandbox's own namespace, and admits only the session's allowlist of `host:port` pairs for every request, redirect, and subresource. The browser's own domain allowlist is a second fence that also disables WebRTC. If the proxy is not running, the browser has no network: it fails closed.
 
-The allowlist starts with the external endpoints an admin approved (`browser_approved_dev_endpoints`). A loopback origin is added when an authorized controller explicitly navigates to it, together with any other loopback origins named in that navigation (`allow_origins`). Navigating to an approved external endpoint, or acting on one of its pages, needs a person's confirmation. Everything else is refused. Browsers launched from the shell are not contained, because the agent's shell has root in the sandbox.
+The allowlist starts with the external endpoints an admin approved (`browser_approved_dev_endpoints`). A loopback origin is added when an authorized controller explicitly navigates to it, together with any other loopback origins named in that navigation (`allow_origins`). Navigating to an approved external endpoint needs no confirmation; clicking a sensitive-looking element on an external page does. Everything else is refused. Browsers launched from the shell are not contained, because the agent's shell has root in the sandbox.
 
 ## How a user watches and takes control
 
@@ -28,7 +28,7 @@ The existing PR image proxy displays published raster images but cannot upload m
 
 A sandbox-wide allowlist would also cut off git, package installs, and the app's own backend, so containment is per browser instead. Each session's browser runs in its own network namespace that has only loopback. Its only way out is an egress proxy that listens on that loopback, connects from the sandbox's own namespace, and admits only the session's allowlist of `host:port` pairs for every request, redirect, and subresource. The browser's own domain allowlist is a second fence that also disables WebRTC. If the proxy is not running, the browser has no network: it fails closed.
 
-The allowlist starts with the external endpoints an admin approved (`browser_approved_dev_endpoints`). A loopback origin is added when an authorized controller explicitly navigates to it, together with any other loopback origins named in that navigation (`allow_origins`). Navigating to an approved external endpoint, or acting on one of its pages, needs a person's confirmation. Everything else is refused. Browsers launched from the shell are not contained, because the agent's shell has root in the sandbox.
+The allowlist starts with the external endpoints an admin approved (`browser_approved_dev_endpoints`). A loopback origin is added when an authorized controller explicitly navigates to it, together with any other loopback origins named in that navigation (`allow_origins`). Navigating to an approved external endpoint needs no confirmation; clicking a sensitive-looking element on an external page does. Everything else is refused. Browsers launched from the shell are not contained, because the agent's shell has root in the sandbox.
 
 ## How a user watches and takes control
 
