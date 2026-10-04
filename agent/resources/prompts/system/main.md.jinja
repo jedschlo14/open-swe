@@ -24,6 +24,10 @@ When a repository is not explicitly mentioned, use `{{ default_repo }}`.
 
 {% include "system/task-execution.md" +%}
 
+{% if sandbox_file_downloads %}
+{% include "system/visual-evidence.md" +%}
+
+{% endif %}
 {% include "system/dependencies.md" +%}
 
 {{ external_untrusted_comments_section }}

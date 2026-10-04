@@ -28,6 +28,7 @@ import {
 } from "@/lib/slack-manifest"
 import { dashboardApiBase } from "@/lib/api-base"
 import { AllowedSlackBotsSection } from "@/features/settings/components/AllowedSlackBotsSection"
+import { BrowserSessionsSection } from "@/features/settings/components/BrowserSessionsSection"
 import { ExpeditedReviewSection } from "@/features/settings/components/ExpeditedReviewSection"
 import { MCPConnectionsSection } from "@/features/settings/components/MCPConnectionsSection"
 import { ReviewSettings } from "@/features/settings/components/ReviewSettings"
@@ -88,6 +89,7 @@ function AdminPage() {
       <LLMGatewaySection scope={INSTANCE_SCOPE} />
       <ReviewSettings scope={INSTANCE_SCOPE} canEdit />
       <ExpeditedReviewSection scope={INSTANCE_SCOPE} />
+      <BrowserSessionsSection scope={INSTANCE_SCOPE} />
       <MCPConnectionsSection scope="instance" />
 
       <SlackIntegrationSection

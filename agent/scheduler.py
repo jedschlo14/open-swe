@@ -11,6 +11,8 @@ from agent.agent_cost import run_agent_cost_refresh
 from agent.baby_sit import evaluate_watch
 from agent.background_tasks import CRON_KIND as BACKGROUND_TASK_CRON_KIND
 from agent.background_tasks import monitor_background_tasks
+from agent.browser.cron import CRON_KIND as BROWSER_SESSION_CRON_KIND
+from agent.browser.manager import sweep as sweep_browser_session
 from agent.human_review.lifecycle import LEGACY_CRON_TASK as EXPEDITED_REVIEW_TASK
 from agent.human_review.lifecycle import delete_legacy_crons
 from agent.human_review.standard import SCHEDULER_TASK as HUMAN_REVIEW_TASK
@@ -77,6 +79,11 @@ async def _launch(state: SchedulerState, config: RunnableConfig) -> dict[str, An
             if not thread_id:
                 return {"result": {"status": "missing_thread_id"}}
             return {"result": await monitor_background_tasks(thread_id)}
+        if task == BROWSER_SESSION_CRON_KIND:
+            thread_id = state.thread_id or cfg.thread_id
+            if not thread_id:
+                return {"result": {"status": "missing_thread_id"}}
+            return {"result": await sweep_browser_session(thread_id)}
         if task in (WORKSPACE_REFRESH_TASK, LEGACY_REFRESH_TASK):
             slug = state.workspace_slug or state.environment_slug or cfg.workspace_slug
             kind = "update" if state.refresh_kind == "update" else "full"

@@ -149,13 +149,21 @@ def _assert_thread_promptable(metadata: Mapping[str, Any], login: str | None) ->
         raise HTTPException(404, "thread not found")
 
 
+def thread_is_postable(
+    metadata: Mapping[str, Any], login: str | None, email: str | None = None
+) -> bool:
+    """Whether ``login`` may act in the thread: prompt it, or drive its live sandbox."""
+    return thread_is_promptable(metadata, login) and (
+        not (metadata.get("admin_thread") is True or _is_automation_thread(metadata))
+        or is_admin(email, login=login)
+    )
+
+
 def _assert_thread_postable(
     metadata: Mapping[str, Any], login: str, email: str | None = None
 ) -> None:
     _assert_thread_promptable(metadata, login)
-    if (metadata.get("admin_thread") is True or _is_automation_thread(metadata)) and not is_admin(
-        email, login=login
-    ):
+    if not thread_is_postable(metadata, login, email):
         raise HTTPException(403, "only admins can send messages in this thread")
 
 
