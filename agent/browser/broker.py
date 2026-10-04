@@ -7,12 +7,13 @@ sensitive actions, whose approvals only a thread writer can grant.
 
 import base64
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
 from langsmith.sandbox import AsyncSandbox
 from pydantic import BaseModel, JsonValue
 
-from agent.browser import engine, manager, policy, store
+from agent.browser import engine, manager, policy, sign_ins, store
 from agent.browser.models import BrowserSession, HandbackNotice, PageRef
 from agent.browser.ops import BrowserOp, ClickOp, NavigateOp, ScreenshotOp, SnapshotOp, commands
 
@@ -101,6 +102,19 @@ async def execute(
     found = await _session_for(thread_id, op, workspace_slug)
     if isinstance(found, BrowserOutcome):
         return found
+    return await _as_agent(
+        thread_id,
+        found,
+        lambda sandbox, session: _execute(sandbox, session, op, confirmation_id),
+    )
+
+
+async def _as_agent(
+    thread_id: str,
+    found: BrowserSession,
+    run: Callable[[AsyncSandbox, BrowserSession], Awaitable[BrowserOutcome]],
+) -> BrowserOutcome:
+    """Run ``run`` on the session's browser under the agent's lease, fenced against takeover."""
     if found.state != "ready" or found.sandbox_id is None:
         return _not_ready(found)
     session = await store.claim_agent_action(found.session_id)
@@ -117,7 +131,7 @@ async def execute(
         return _not_ready(latest or found)
     try:
         async with engine.connected(session.sandbox_id) as sandbox:
-            outcome = await _execute(sandbox, session, op, confirmation_id)
+            outcome = await run(sandbox, session)
     except engine.SandboxLostError:
         await manager.fail(session, "sandbox_lost")
         return BrowserOutcome(
@@ -228,6 +242,57 @@ async def _execute(
     if isinstance(op, NavigateOp):
         return BrowserOutcome(status="ok", url=_text(data, "url"), title=_text(data, "title"))
     return BrowserOutcome(status="ok")
+
+
+async def restore_sign_in(
+    thread_id: str, origin: str, *, owner: str, workspace_slug: str | None
+) -> BrowserOutcome:
+    """Restore ``owner``'s saved sign-in for ``origin`` into the thread's browser."""
+    target = sign_ins.canonical_origin(origin)
+    endpoint = policy.endpoint_of(target) if target else None
+    if target is None or endpoint is None:
+        return BrowserOutcome(
+            status="refused", message="Saved sign-ins are for external http(s) origins only."
+        )
+    saved = await sign_ins.load(owner, target)
+    if saved is None:
+        available = sign_ins.origins(await sign_ins.list_for(owner))
+        return BrowserOutcome(
+            status="error",
+            message=f"No saved sign-in for {target}. Saved: {', '.join(available) or 'none'}.",
+        )
+    record, state = saved
+    if record.status == "expired":
+        return _EXPIRED
+    try:
+        found = await manager.ensure_session(
+            thread_id, started_by="agent", workspace_slug=workspace_slug
+        )
+    except manager.BrowserUnsupportedError as exc:
+        return BrowserOutcome(status="unavailable", message=str(exc))
+    if endpoint.key not in found.approved_endpoints:
+        return BrowserOutcome(
+            status="refused", message=f"{endpoint.host} is no longer an approved endpoint."
+        )
+
+    async def run(sandbox: AsyncSandbox, session: BrowserSession) -> BrowserOutcome:
+        if not await engine.apply_sign_in(sandbox, session, target, state):
+            await sign_ins.mark_expired(record.sign_in_id)
+            return _EXPIRED
+        await sign_ins.mark_used(record.sign_in_id)
+        logger.info(
+            "Browser sign-in restored",
+            extra={"browser_session_id": session.session_id, "sign_in_id": record.sign_in_id},
+        )
+        return BrowserOutcome(status="ok", message=f"Signed in to {target} with a saved sign-in.")
+
+    return await _as_agent(thread_id, found, run)
+
+
+_EXPIRED = BrowserOutcome(
+    status="error",
+    message="The saved sign-in expired. Ask the user to sign in again by taking control, then save it.",
+)
 
 
 def _describe(op: BrowserOp) -> str:

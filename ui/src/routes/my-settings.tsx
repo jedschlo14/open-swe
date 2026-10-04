@@ -7,6 +7,7 @@ import { ConnectionsSection } from "@/features/settings/components/ConnectionsSe
 import { MCPConnectionsSection } from "@/features/settings/components/MCPConnectionsSection"
 import { PersonalInstructionsSection } from "@/features/settings/components/PersonalInstructionsSection"
 import { PreferencesSection } from "@/features/settings/components/PreferencesSection"
+import { SavedSignInsSection } from "@/features/settings/components/SavedSignInsSection"
 import { PullRequestsSection } from "@/features/settings/components/PullRequestsSection"
 import { RequireLogin } from "@/lib/auth-redirect"
 import { pageTitle } from "@/lib/pageTitle"
@@ -41,6 +42,7 @@ function MySettingsPage() {
       <PullRequestsSection />
       <ConnectionsSection user={session.data} />
       <MCPConnectionsSection scope="user" />
+      <SavedSignInsSection />
       <PersonalInstructionsSection />
       <AboutSection user={session.data} />
     </AppShell>

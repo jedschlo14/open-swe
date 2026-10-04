@@ -131,6 +131,7 @@ class BrowserSessionView(BaseModel):
     controller_login: str | None = None
     handoff: Handoff | None = None
     viewer_controls: bool = False
+    can_save_sign_in: bool = False
     pending_confirmation: PendingConfirmation | None = None
     live_view: bool = False
 

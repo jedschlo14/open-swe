@@ -13,11 +13,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from pydantic import JsonValue
 from sqlalchemy import text
 
-from agent.browser import broker, engine, lease, manager, routes, store
+from agent.browser import broker, engine, lease, manager, routes, sign_ins, store
 from agent.browser.live import gate as live_gate
 from agent.browser.live import messages
 from agent.browser.models import BrowserSession
@@ -48,13 +49,15 @@ class FakeEngine:
         self.closes += 1
 
     async def run_command(
-        self, sandbox: str, session: BrowserSession, args: list[str]
+        self, sandbox: str, session: BrowserSession, args: list[str], *, timeout: int = 60
     ) -> dict[str, JsonValue]:
         self.commands.append(args)
         if self.on_command is not None:
             await self.on_command(args)
         if args[0] == "get":
             return {"url": self.page_url, "title": "Settings"}
+        if args[0] == "eval":
+            return {"result": False}
         if args[0] == "snapshot":
             return {"refs": {"e1": {"role": "button", "name": "Delete account"}}}
         return {}
@@ -296,3 +299,41 @@ async def test_an_agent_action_interrupted_by_a_takeover_is_discarded(
     assert ["mouse", "down"] not in sandbox.engine.commands
     settled = await store.active(THREAD)
     assert settled is not None and settled.agent_inflight == 0
+
+
+async def test_a_saved_sign_in_is_restored_only_for_its_owner_until_revoked(
+    sandbox: Sandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(
+        manager, "_session_settings", AsyncMock(return_value=(3600, ["app.example.com:443"]))
+    )
+    sandbox.engine.page_url = "https://app.example.com/"
+    state = sign_ins.SignInState(
+        cookies=[
+            sign_ins.SignInCookie(
+                name="sid", value="s3cret", domain="app.example.com", http_only=True
+            )
+        ],
+        local_storage={"token": "t"},
+    )
+    saved = await sign_ins.save("Alice", "https://app.example.com", state)
+
+    stranger = await broker.restore_sign_in(
+        THREAD, "https://app.example.com", owner="bob", workspace_slug=None
+    )
+    restored = await broker.restore_sign_in(
+        THREAD, "https://app.example.com", owner="alice", workspace_slug=None
+    )
+
+    assert stranger.status == "error"
+    assert restored.status == "ok"
+    cookie = next(args for args in sandbox.engine.commands if args[:3] == ["cookies", "set", "sid"])
+    assert "--httpOnly" in cookie
+    assert (await sign_ins.list_for("alice"))[0].last_used_at is not None
+
+    assert await sign_ins.delete("alice", saved.sign_in_id)
+    revoked = await broker.restore_sign_in(
+        THREAD, "https://app.example.com", owner="alice", workspace_slug=None
+    )
+    assert revoked.status == "error"

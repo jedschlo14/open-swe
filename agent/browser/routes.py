@@ -13,8 +13,9 @@ from fastapi import APIRouter, HTTPException, Response, WebSocket
 from pydantic import BaseModel, ConfigDict, JsonValue
 from pydantic.alias_generators import to_camel
 
-from agent.browser import lease, live, manager, store
+from agent.browser import engine, lease, live, manager, sign_ins, store
 from agent.browser.models import BrowserSession, BrowserSessionView
+from agent.browser.policy import endpoint_of
 from agent.dashboard.deps import SESSION_DEP
 from agent.dashboard.oauth import (
     BrowserTicket,
@@ -73,11 +74,25 @@ def _view(
     metadata: dict[str, JsonValue],
     viewer: dict[str, Any] | None = None,
 ) -> BrowserSessionView:
-    return BrowserSessionView.of(
+    login = viewer["sub"] if viewer else None
+    view = BrowserSessionView.of(
         session,
         now=datetime.now(UTC),
         supported=manager.browser_supported(metadata),
-        viewer=viewer["sub"] if viewer else None,
+        viewer=login,
+    )
+    if view.viewer_controls and _owns_private_thread(metadata, login):
+        view.can_save_sign_in = True
+    return view
+
+
+def _owns_private_thread(metadata: dict[str, JsonValue], login: str | None) -> bool:
+    owner = metadata.get("owner_login")
+    return (
+        metadata.get("visibility") == "private"
+        and login is not None
+        and isinstance(owner, str)
+        and owner.lower() == login.lower()
     )
 
 
@@ -241,3 +256,53 @@ async def api_browser_handback(
     except lease.LeaseConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
     return _view(returned, metadata, session)
+
+
+@router.get("/browser/saved-sign-ins")
+async def api_browser_saved_sign_ins(
+    session: dict[str, Any] = SESSION_DEP,
+) -> list[sign_ins.SavedSignIn]:
+    """The caller's saved sign-ins, without their contents."""
+    return await sign_ins.list_for(session["sub"])
+
+
+@router.delete("/browser/saved-sign-ins/{sign_in_id}", status_code=204)
+async def api_browser_delete_saved_sign_in(
+    sign_in_id: str, session: dict[str, Any] = SESSION_DEP
+) -> Response:
+    """Revoke a saved sign-in; the next restore finds nothing."""
+    if not await sign_ins.delete(session["sub"], sign_in_id):
+        raise HTTPException(404, "saved sign-in not found")
+    return Response(status_code=204)
+
+
+@router.post("/threads/{thread_id}/browser/saved-sign-in")
+async def api_browser_save_sign_in(
+    thread_id: str, session: dict[str, Any] = SESSION_DEP
+) -> sign_ins.SavedSignIn:
+    """Save the sign-in on the page the caller is controlling, for reuse in their private threads."""
+    metadata = await _writable(thread_id, session)
+    login = session["sub"]
+    if not _owns_private_thread(metadata, login):
+        raise HTTPException(403, "sign-ins can only be saved from a private thread you own")
+    current = await manager.current(thread_id)
+    if current is None or current.sandbox_id is None or not current.user_controls(login):
+        raise HTTPException(409, "take control of the browser before saving a sign-in")
+    try:
+        async with engine.connected(current.sandbox_id) as sandbox:
+            origin = await engine.current_origin(sandbox, current)
+            endpoint = endpoint_of(origin) if origin else None
+            if origin is None or endpoint is None or endpoint.key not in current.approved_endpoints:
+                raise HTTPException(
+                    409, "open a page on an approved external endpoint, then sign in there"
+                )
+            state = await engine.capture_sign_in(sandbox, current, origin)
+    except engine.SandboxLostError as exc:
+        raise HTTPException(409, "the browser's sandbox is gone") from exc
+    except engine.EngineCommandError as exc:
+        raise HTTPException(502, f"could not read the browser's sign-in: {exc}") from exc
+    if not state.cookies and not state.local_storage:
+        raise HTTPException(409, "this page has no sign-in to save; sign in first")
+    if len(state.model_dump_json()) > sign_ins.MAX_STATE_CHARS:
+        raise HTTPException(413, "this sign-in is too large to save")
+    return await sign_ins.save(login, origin, state)

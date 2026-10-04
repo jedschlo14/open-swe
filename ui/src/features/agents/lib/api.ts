@@ -156,9 +156,22 @@ export interface BrowserSessionView {
   handoff: "none" | "takeover" | "handback" | null
   /** Whether the person asking holds the lease and may drive the page. */
   viewerControls: boolean
+  /** Whether the person asking may save the page's sign-in for their private threads. */
+  canSaveSignIn: boolean
   pendingConfirmation: BrowserPendingConfirmation | null
   /** Whether the browser runs on a display the dashboard can stream. */
   liveView: boolean
+}
+
+export const SAVED_SIGN_INS_QUERY_KEY = ["browserSavedSignIns"] as const
+
+export interface SavedBrowserSignIn {
+  signInId: string
+  origin: string
+  createdAt: string
+  expiresAt: string
+  lastUsedAt: string | null
+  status: "active" | "expired"
 }
 
 export type BrowserSessionAction =
@@ -545,6 +558,18 @@ export const agentsApi = {
     agentsRequest<BrowserSessionView>(
       `/threads/${encodeURIComponent(threadId)}/browser/confirmations/${encodeURIComponent(confirmationId)}`,
       { method: "POST", body: JSON.stringify({ approve }) }
+    ),
+  saveBrowserSignIn: (threadId: string) =>
+    agentsRequest<SavedBrowserSignIn>(
+      `/threads/${encodeURIComponent(threadId)}/browser/saved-sign-in`,
+      { method: "POST" }
+    ),
+  getSavedBrowserSignIns: () =>
+    agentsRequest<Array<SavedBrowserSignIn>>("/browser/saved-sign-ins"),
+  deleteSavedBrowserSignIn: (signInId: string) =>
+    agentsRequest<void>(
+      `/browser/saved-sign-ins/${encodeURIComponent(signInId)}`,
+      { method: "DELETE" }
     ),
   connectBrowserLive: (threadId: string) =>
     agentsRequest<BrowserLiveConnection>(
