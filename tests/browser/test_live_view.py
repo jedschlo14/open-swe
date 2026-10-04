@@ -1,31 +1,26 @@
-"""The live view's translation layer between the dashboard viewer and neko."""
+"""The live view's translation layer between the dashboard viewer and the display helper."""
 
-import base64
-import hashlib
-import hmac
+import asyncio
 
 import pytest
 
-from agent.browser import engine, neko, turn
+from agent.browser import display, engine
 from agent.browser.live import messages
 from agent.browser.live.actions import with_scheme
+from agent.browser.live.h264 import AccessUnitSplitter
 from agent.browser.live.keysyms import keysym_for
-from agent.browser.live.webrtc import WheelAccumulator, to_neko, to_viewer
+from agent.browser.live.stream import VideoBacklog, WheelAccumulator, to_helper
 from agent.browser.models import BrowserSession
-from agent.browser.neko_client import _profile
-from agent.config import ENV
 
 SCREEN = (2160, 1344)
-RELAY = "candidate:1 1 udp 41885439 203.0.113.9 50000 typ relay raddr 0.0.0.0 rport 0"
-HOST = "candidate:2 1 udp 2130706431 127.0.0.1 59047 typ host"
+AUD = b"\x00\x00\x00\x01\x09\x10"
+SPS = b"\x00\x00\x00\x01\x67\x64\x00\x2a\xac"
+KEYFRAME = AUD + SPS + b"\x00\x00\x00\x01\x68\xee\x3c\x80" + b"\x00\x00\x01\x65\x88\x84"
+DELTA = AUD + b"\x00\x00\x01\x41\x9a\x24"
 
 
 @pytest.fixture(autouse=True)
-def _turn_and_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(
-        "BROWSER_TURN_URLS", "turn:turn.example.com:3478, turns:turn.example.com:443"
-    )
-    monkeypatch.setenv("BROWSER_TURN_SECRET", "relay-secret")
+def _dashboard_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DASHBOARD_JWT_SECRET", "dashboard-secret")
 
 
@@ -33,55 +28,46 @@ def _session(session_id: str = "000000000000004e") -> BrowserSession:
     return BrowserSession.model_construct(session_id=session_id)
 
 
-def test_the_viewer_only_learns_relay_candidates_and_its_own_turn_credential() -> None:
-    ice = turn.mint("abc", ttl_seconds=60)
-    candidate = {"event": "signal/candidate", "payload": {"candidate": HOST, "sdpMid": "0"}}
+def test_the_stream_is_cut_into_frames_wherever_the_chunks_fall() -> None:
+    stream = KEYFRAME + DELTA + DELTA + KEYFRAME
+    splitter = AccessUnitSplitter()
+    units = [
+        unit
+        for index in range(0, len(stream), 7)
+        for unit in splitter.feed(stream[index : index + 7])
+    ]
 
-    assert to_viewer(candidate, ice) is None
-    relayed = to_viewer({**candidate, "payload": {"candidate": RELAY, "sdpMid": "0"}}, ice)
-    assert relayed is not None and relayed["event"] == "candidate"
-
-    provide = to_viewer(
-        {
-            "event": "signal/provide",
-            "payload": {"sdp": "v=0", "iceservers": [{"urls": ["stun:x"]}]},
-        },
-        ice,
-    )
-    assert provide == {
-        "type": "signal",
-        "event": "provide",
-        "sdp": "v=0",
-        "iceServers": [ice.as_json()],
-        "relayOnly": True,
-    }
-    roster = {"event": "system/init", "payload": {"sessions": {"someone": {}}}}
-    assert to_viewer(roster, ice) is None
+    assert [unit.keyframe for unit in units] == [True, False, False]
+    assert b"".join(unit.data for unit in units) == KEYFRAME + DELTA + DELTA
+    assert units[0].codec == "avc1.64002A"
+    assert units[1].codec is None
+    assert [unit.keyframe for unit in splitter.feed(AUD)] == [True]
 
 
-def test_turn_credentials_are_scoped_to_the_session_and_expire() -> None:
-    ice = turn.mint("abc", ttl_seconds=60, now=1_000)
-    expires, session_id = ice.username.split(":")
+def test_a_slow_viewer_skips_to_the_next_keyframe_instead_of_falling_behind() -> None:
+    async def scenario() -> list[bool]:
+        splitter = AccessUnitSplitter()
+        frames = splitter.feed(KEYFRAME + DELTA * 5 + KEYFRAME + DELTA + AUD)
+        backlog = VideoBacklog(limit=3)
+        for frame in frames:
+            backlog.push(frame)
+        return [(await backlog.pop()).keyframe for _ in range(2)]
 
-    assert (expires, session_id) == ("1060", "abc")
-    expected = hmac.new(b"relay-secret", ice.username.encode(), hashlib.sha1).digest()
-    assert ice.credential == base64.b64encode(expected).decode()
-    assert ice.urls == ("turn:turn.example.com:3478", "turns:turn.example.com:443")
-
-
-def test_without_turn_nothing_is_offered(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BROWSER_TURN_SECRET")
-
-    assert not turn.configured()
-    with pytest.raises(RuntimeError):
-        turn.mint("abc", ttl_seconds=60)
-    assert ENV.BROWSER_TURN_URLS.get()
+    assert asyncio.run(scenario()) == [True, False]
 
 
-def test_only_a_control_ticket_gets_a_member_that_may_host() -> None:
-    assert _profile("control")["can_host"] is True
-    assert _profile("view")["can_host"] is False
-    assert _profile("control")["is_admin"] is False
+def test_a_new_encode_discards_frames_of_the_old_one() -> None:
+    async def scenario() -> bool:
+        backlog = VideoBacklog()
+        splitter = AccessUnitSplitter()
+        for frame in splitter.feed(KEYFRAME + DELTA + AUD):
+            backlog.push(frame)
+        backlog.restart()
+        for frame in splitter.feed(DELTA + KEYFRAME + AUD):
+            backlog.push(frame)
+        return (await backlog.pop()).keyframe
+
+    assert asyncio.run(scenario()) is True
 
 
 def test_pointer_events_are_scaled_to_the_display_and_kept_on_it() -> None:
@@ -89,9 +75,9 @@ def test_pointer_events_are_scaled_to_the_display_and_kept_on_it() -> None:
     move = messages.MouseMessage(type="mouse", action="move", x=100, y=50)
     edge = messages.MouseMessage(type="mouse", action="down", x=9_000, y=9_000, button=2)
 
-    assert to_neko(move, SCREEN, wheel) == [("control/move", {"x": 150, "y": 75})]
-    assert to_neko(edge, SCREEN, wheel) == [
-        ("control/buttondown", {"x": 2159, "y": 1343, "code": 3})
+    assert to_helper(move, SCREEN, wheel) == [{"type": "move", "x": 150, "y": 75}]
+    assert to_helper(edge, SCREEN, wheel) == [
+        {"type": "button", "x": 2159, "y": 1343, "code": 3, "down": True}
     ]
 
 
@@ -99,9 +85,10 @@ def test_wheel_deltas_add_up_to_whole_clicks_and_scroll_the_page_the_same_way() 
     wheel = WheelAccumulator()
     scroll = messages.MouseMessage(type="mouse", action="wheel", x=10, y=10, dy=40)
 
-    assert to_neko(scroll, SCREEN, wheel) == []
-    [_, (event, payload)] = to_neko(scroll, SCREEN, wheel)
-    assert event == "control/scroll" and payload["delta_y"] == -1
+    assert to_helper(scroll, SCREEN, wheel) == []
+    [event] = to_helper(scroll, SCREEN, wheel)
+    assert event["type"] == "scroll" and event["up"] == -1
+    assert to_helper(scroll, SCREEN, wheel) == []
 
 
 def test_keys_become_keysyms_and_characters_the_display_lacks_are_not_mapped() -> None:
@@ -111,21 +98,23 @@ def test_keys_become_keysyms_and_characters_the_display_lacks_are_not_mapped() -
     assert keysym_for("世", "KeyX") is None
     assert keysym_for("Dead", "KeyE") is None
     typed = messages.KeyMessage(type="key", action="down", key="Enter", code="Enter")
-    assert to_neko(typed, SCREEN, WheelAccumulator()) == [("control/keydown", {"keysym": 0xFF0D})]
+    assert to_helper(typed, SCREEN, WheelAccumulator()) == [
+        {"type": "key", "keysym": 0xFF0D, "down": True}
+    ]
 
 
-def test_every_session_has_its_own_display_and_admin_token() -> None:
+def test_every_session_has_its_own_display_and_helper_token() -> None:
     first, second = _session("000000000000004e"), _session("000000000000004f")
 
-    assert neko.display_name(first) != neko.display_name(second)
-    assert neko.api_token(first) != neko.api_token(second)
-    assert neko.api_token(first) == neko.api_token(first)
+    assert display.display_name(first) != display.display_name(second)
+    assert display.token(first) != display.token(second)
+    assert display.token(first) == display.token(first)
 
 
-def test_the_display_is_sized_on_the_grid_neko_can_set() -> None:
-    width, height = neko.screen_for(1013, 601, engine.RENDER_SCALE)
+def test_the_display_is_sized_on_an_even_grid() -> None:
+    width, height = display.screen_for(1013, 601, engine.RENDER_SCALE)
 
-    assert width % 8 == 0
+    assert width % 2 == 0 and height % 2 == 0
     assert (width, height) == (round(1008 * 1.5), round(592 * 1.5))
 
 

@@ -24,10 +24,9 @@ export type StageOwner =
   | { kind: "person"; login: string | null }
 
 interface BrowserStageProps {
-  attachVideo: (node: HTMLVideoElement | null) => void
+  attachCanvas: (node: HTMLCanvasElement | null) => void
   containerRef: (node: HTMLDivElement | null) => void
   geometry: BrowserGeometry | null
-  cursor: string
   status: BrowserLiveStatus
   owner: StageOwner
   takingOver: boolean
@@ -56,7 +55,7 @@ export function BrowserStage(props: BrowserStageProps) {
   const driving = owner.kind === "you" && status === "live"
   const takeoverReady =
     owner.kind === "agent" && owner.canTakeOver && status === "live"
-  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const held = useRef(new Map<string, string>())
@@ -64,13 +63,13 @@ export function BrowserStage(props: BrowserStageProps) {
   const frame = useRef(0)
   const mac = useRef(isMacPlatform())
 
-  const { attachVideo, containerRef } = props
+  const { attachCanvas, containerRef } = props
   const attach = useCallback(
-    (node: HTMLVideoElement | null) => {
-      videoRef.current = node
-      attachVideo(node)
+    (node: HTMLCanvasElement | null) => {
+      canvasRef.current = node
+      attachCanvas(node)
     },
-    [attachVideo]
+    [attachCanvas]
   )
 
   const attachStage = useCallback(
@@ -82,7 +81,7 @@ export function BrowserStage(props: BrowserStageProps) {
   )
 
   const point = (event: { clientX: number; clientY: number }) => {
-    const rect = videoRef.current?.getBoundingClientRect()
+    const rect = canvasRef.current?.getBoundingClientRect()
     if (!rect) return null
     return { x: event.clientX - rect.left, y: event.clientY - rect.top }
   }
@@ -138,7 +137,7 @@ export function BrowserStage(props: BrowserStageProps) {
   }, [driving, send])
 
   const sendButton = (
-    event: React.PointerEvent<HTMLVideoElement>,
+    event: React.PointerEvent<HTMLCanvasElement>,
     action: "down" | "up"
   ) => {
     const at = point(event)
@@ -178,12 +177,8 @@ export function BrowserStage(props: BrowserStageProps) {
       ref={attachStage}
       className="group relative min-h-0 flex-1 overflow-hidden bg-muted/40 select-none"
     >
-      <video
+      <canvas
         ref={attach}
-        autoPlay
-        muted
-        playsInline
-        disablePictureInPicture
         aria-label={
           driving
             ? "The thread's browser. You are in control."
@@ -196,7 +191,7 @@ export function BrowserStage(props: BrowserStageProps) {
         style={{
           width: geometry ? geometry.cssWidth : "100%",
           height: geometry ? geometry.cssHeight : "100%",
-          cursor: driving ? props.cursor : "default",
+          cursor: driving ? "none" : "default",
         }}
         onPointerDown={(event) => {
           if (!driving) return

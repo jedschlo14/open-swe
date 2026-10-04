@@ -1,4 +1,4 @@
-"""X keysyms for browser key events, which is what neko's keyboard input takes.
+"""X keysyms for browser key events, which is what the display's keyboard input takes.
 
 Characters outside ASCII have no keycode on the display, so they are not mapped here;
 the relay inserts them as text instead.

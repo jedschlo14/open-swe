@@ -166,9 +166,8 @@ export function BrowserPanel(props: { threadId: string }) {
     [stageSize]
   )
   const {
-    attachVideo,
+    attachCanvas,
     send,
-    cursor,
     page,
     geometry,
     status: liveStatus,
@@ -373,10 +372,9 @@ export function BrowserPanel(props: { threadId: string }) {
       ) : null}
       {view.liveView ? (
         <BrowserStage
-          attachVideo={attachVideo}
+          attachCanvas={attachCanvas}
           containerRef={stageRef}
           geometry={geometry}
-          cursor={cursor}
           status={liveStatus}
           owner={owner}
           takingOver={takingOver || action.isPending}
@@ -397,9 +395,8 @@ export function BrowserPanel(props: { threadId: string }) {
           <Globe2 className="size-5" />
           <p>The live view isn't available for this browser.</p>
           <p className="max-w-xs text-xs">
-            Showing the browser needs neko in the sandbox image and a TURN
-            relay (BROWSER_TURN_URLS) configured on the server. The agent can
-            still use it.
+            This sandbox image needs Xorg, openbox, and ffmpeg to show the
+            browser. The agent can still use it.
           </p>
         </Centered>
       )}

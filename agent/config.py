@@ -455,18 +455,6 @@ ENV.var("E2B_API_KEY", "E2B API key.", secret=True)
 ENV.var("E2B_TEMPLATE", "E2B template new sandboxes boot from.")
 ENV.var("RUNLOOP_API_KEY", "Runloop API key.", secret=True)
 
-# --- Browser live view -----------------------------------------------------------------------
-ENV.var(
-    "BROWSER_TURN_URLS",
-    "Comma-separated TURN server URLs (turn:/turns:) relaying the thread browser's live view "
-    "between the sandbox and the dashboard; unset disables the live view.",
-)
-ENV.var(
-    "BROWSER_TURN_SECRET",
-    "Shared secret of the TURN server (coturn use-auth-secret) that credentials are minted from.",
-    secret=True,
-)
-
 # --- Desktop, local auth and debugging -------------------------------------------------------
 ENV.var(
     "OPEN_SWE_LOCAL_PROJECTS_FILE", "Allowlist file of local projects the desktop agent may open."

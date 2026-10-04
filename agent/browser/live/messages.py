@@ -64,30 +64,8 @@ class PasteMessage(_Message):
     text: Annotated[str, Field(max_length=engine.MAX_TEXT_CHARS)]
 
 
-class IceCandidate(_Message):
-    candidate: Annotated[str, Field(max_length=2048)]
-    sdpMid: Annotated[str, Field(max_length=64)] | None = None
-    sdpMLineIndex: Annotated[int, Field(ge=0, le=64)] | None = None
-    usernameFragment: Annotated[str, Field(max_length=256)] | None = None
-
-
-class SignalMessage(_Message):
-    """WebRTC signaling between the viewer's peer connection and neko; any viewer may send it."""
-
-    type: Literal["signal"]
-    event: Literal["request", "answer", "candidate", "restart"]
-    sdp: Annotated[str, Field(max_length=65_536)] = ""
-    candidate: IceCandidate | None = None
-
-
 ClientMessage = (
-    MouseMessage
-    | KeyMessage
-    | ResizeMessage
-    | NavigateMessage
-    | CopyMessage
-    | PasteMessage
-    | SignalMessage
+    MouseMessage | KeyMessage | ResizeMessage | NavigateMessage | CopyMessage | PasteMessage
 )
 _ADAPTER: TypeAdapter[ClientMessage] = TypeAdapter(
     Annotated[ClientMessage, Field(discriminator="type")]

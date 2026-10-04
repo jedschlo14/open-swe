@@ -6,11 +6,11 @@ admits the session's allowlist and nothing else, so a dead proxy means no
 network rather than an open one. Every command enters that namespace, so a
 daemon that has to be respawned is respawned inside it too.
 
-Chromium runs headed on a private virtual display served by neko (see
-``agent.browser.neko``) when the sandbox image carries it and a TURN relay is
-configured, so the live view streams real video over WebRTC and native widgets
-such as ``<select>`` popups appear. Otherwise it runs headless and the session
-simply has no live view; the agent is unaffected.
+Chromium runs headed on a private virtual display (see ``agent.browser.display``)
+when the sandbox has, or can install, Xorg, openbox, and ffmpeg, so the live view
+streams real video and native widgets such as ``<select>`` popups appear.
+Otherwise it runs headless and the session simply has no live view; the agent is
+unaffected.
 
 Every call goes through ``sandbox.run`` with the server's own credentials; the
 browser's DevTools port stays on the namespace's loopback.
@@ -31,7 +31,7 @@ from langsmith.sandbox import AsyncSandbox, ResourceNotFoundError
 from PIL import Image
 from pydantic import JsonValue
 
-from agent.browser import neko, turn
+from agent.browser import display
 from agent.browser.models import BrowserSession
 from agent.browser.policy import allowed_domains
 
@@ -128,7 +128,7 @@ def _env(session: BrowserSession, *, headed: bool) -> dict[str, str]:
         env |= {
             "AGENT_BROWSER_HEADED": "1",
             "AGENT_BROWSER_NO_XVFB": "1",
-            "DISPLAY": neko.display_name(session),
+            "DISPLAY": display.display_name(session),
             "AGENT_BROWSER_ARGS": ",".join(
                 (f"--force-device-scale-factor={RENDER_SCALE}", "--kiosk", "--disable-infobars")
             ),
@@ -251,25 +251,24 @@ async def _start_helper(
 
 
 async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int | None:
-    """Launch the session's isolated browser; returns neko's sandbox-loopback port.
+    """Launch the session's isolated browser; returns the display helper's sandbox-loopback port.
 
-    ``None`` means the browser has no live view (neko is not in the sandbox image or
-    no TURN relay is configured), so it runs headless and only the agent uses it.
+    ``None`` means the browser has no live view (the sandbox cannot provide a display),
+    so it runs headless and only the agent uses it.
     """
     await check_engine(sandbox)
-    live = await _live_view_available(sandbox, session)
+    live = await display.ensure_installed(sandbox)
+    if not live:
+        logger.info(
+            "The sandbox cannot provide a display; the browser runs without a live view",
+            extra={"browser_session_id": session.session_id},
+        )
     await _isolate(sandbox, session)
     port: int | None = None
     if live:
         try:
-            port = await neko.start(
-                sandbox,
-                session,
-                session_dir(session),
-                neko.screen_for(VIEWPORT_WIDTH, VIEWPORT_HEIGHT, RENDER_SCALE),
-                turn.mint(session.session_id, ttl_seconds=turn.BACKEND_TTL_SECONDS),
-            )
-        except neko.NekoError as exc:
+            port = await _start_display(sandbox, session)
+        except display.DisplayError as exc:
             raise EngineCommandError(str(exc)) from exc
     await run_command(
         sandbox, session, ["get", "url"], timeout=_LAUNCH_TIMEOUT_SECONDS, headed=live
@@ -279,20 +278,29 @@ async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int | None:
     return port
 
 
-async def _live_view_available(sandbox: AsyncSandbox, session: BrowserSession) -> bool:
-    if not turn.configured():
-        logger.info(
-            "No TURN relay is configured; the browser runs without a live view",
-            extra={"browser_session_id": session.session_id},
-        )
-        return False
-    if not await neko.installed(sandbox):
-        logger.info(
-            "neko is not in the sandbox image; the browser runs without a live view",
-            extra={"browser_session_id": session.session_id},
-        )
-        return False
-    return True
+async def _start_display(sandbox: AsyncSandbox, session: BrowserSession) -> int:
+    directory = session_dir(session)
+    await display.start_x(sandbox, session, directory)
+    await sandbox.write(f"{directory}/{display.HELPER_SCRIPT}", display.helper_script())
+    await sandbox.write(f"{directory}/display.token", display.token(session))
+    width, height = display.screen_for(VIEWPORT_WIDTH, VIEWPORT_HEIGHT, RENDER_SCALE)
+    ready = await _start_helper(
+        sandbox,
+        session,
+        "display",
+        display.HELPER_SCRIPT,
+        [
+            display.display_name(session),
+            str(width),
+            str(height),
+            str(display.FRAME_RATE),
+            f"{directory}/display.token",
+        ],
+    )
+    port = ready.split()[-1]
+    if not port.isdigit():
+        raise display.DisplayError(f"the display helper reported {ready!r}")
+    return int(port)
 
 
 def clamp_viewport(width: int, height: int) -> tuple[int, int]:
@@ -311,7 +319,7 @@ async def set_viewport(
     *,
     headed: bool | None = None,
 ) -> None:
-    """Size a headless page; a headed page follows the display, which neko resizes."""
+    """Size a headless page; a headed page follows the display, which the helper resizes."""
     await run_command(
         sandbox,
         session,
@@ -429,7 +437,7 @@ async def close(sandbox: AsyncSandbox, session: BrowserSession) -> None:
     directory = shlex.quote(session_dir(session))
     namespace = shlex.quote(session.network_namespace)
     await sandbox.run(
-        f"{neko.stop_command(session, session_dir(session))}"
+        f"{display.stop_command(session, session_dir(session))}"
         f" [ -f {directory}/proxy.pid ] && kill $(cat {directory}/proxy.pid) 2>/dev/null;"
         f" ip netns delete {namespace} 2>/dev/null; rm -rf {directory}; true"
     )
