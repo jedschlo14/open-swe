@@ -53,8 +53,10 @@ interface RightPanelTabsProps {
   onAddTerminal: () => void
   onAddDiff: () => void
   onAddFiles: () => void
+  onAddBrowser: () => void
   terminalAvailable: boolean
   diffAvailable: boolean
+  browserAvailable: boolean
   children: ReactNode
 }
 
@@ -62,6 +64,7 @@ const SURFACE_DISABLED_REASONS = {
   terminal: "Terminals are only available from a running workspace.",
   diff: "Changes are only available for threads with a repository.",
   files: "Files are only available from a running workspace.",
+  browser: "The browser is only available in cloud threads.",
 } as const
 
 /** Overlays that must win over the launcher's letter shortcuts. */
@@ -79,6 +82,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   terminal: "Available once the workspace is running.",
   diff: "Available for Git repositories.",
   files: "Available once the workspace is running.",
+  browser: "Requires a cloud workspace.",
 } as const
 
 type SurfaceShortcutEvent = Pick<
@@ -150,8 +154,10 @@ function RightPanelEmptyState(props: {
   onAddTerminal: () => void
   onAddDiff: () => void
   onAddFiles: () => void
+  onAddBrowser: () => void
   terminalAvailable: boolean
   diffAvailable: boolean
+  browserAvailable: boolean
 }) {
   // -1 means no highlight: it only appears on hover or arrow use.
   const [highlight, setHighlight] = useState(-1)
@@ -183,6 +189,15 @@ function RightPanelEmptyState(props: {
       available: props.terminalAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.files,
       onClick: props.onAddFiles,
+    },
+    {
+      label: "Browser",
+      description: "Watch this thread's browser.",
+      icon: Globe2,
+      shortcut: "B",
+      available: props.browserAvailable,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.browser,
+      onClick: props.onAddBrowser,
     },
   ] as const
 
@@ -436,6 +451,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       disabledReason: SURFACE_DISABLED_REASONS.files,
       onClick: props.onAddFiles,
     },
+    {
+      label: "Browser",
+      icon: Globe2,
+      shortcut: "B",
+      available: props.browserAvailable,
+      disabledReason: SURFACE_DISABLED_REASONS.browser,
+      onClick: props.onAddBrowser,
+    },
   ] as const
 
   const handleAddSurfaceMenuKeyDown = (
@@ -669,8 +692,10 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddTerminal={props.onAddTerminal}
             onAddDiff={props.onAddDiff}
             onAddFiles={props.onAddFiles}
+            onAddBrowser={props.onAddBrowser}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}
+            browserAvailable={props.browserAvailable}
           />
         ) : (
           props.children

@@ -12,11 +12,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from langgraph_sdk.errors import NotFoundError
+from langsmith.sandbox import AsyncSandbox
 from pydantic import JsonValue
 
 from agent.bridge.store import Bridge
 from agent.browser import cron, engine, store
-from agent.browser.models import IDLE_WARNING_LEAD, BrowserSession, StopReason
+from agent.browser.models import IDLE_WARNING_LEAD, BrowserSession, FailureReason, StopReason
 from agent.config import ENV
 from agent.utils.json_types import thread_metadata
 from agent.utils.thread_ops import langgraph_client
@@ -27,6 +28,7 @@ _START_WAIT = timedelta(seconds=150)
 _START_POLL_SECONDS = 1.0
 _STALE_START = timedelta(minutes=5)
 _STALE_STOP = timedelta(minutes=2)
+_STALE_HANDOFF = timedelta(minutes=1)
 
 SweepOutcome = Literal[
     "no_session", "stale_start", "stale_stop", "thread_closed", "lost", "expired", "warned", "ok"
@@ -54,11 +56,12 @@ async def get_sandbox_metadata(thread_id: str) -> dict[str, JsonValue]:
     return thread_metadata(await langgraph_client().threads.get(thread_id))
 
 
-async def _idle_timeout_seconds(workspace_slug: str | None) -> int:
+async def _session_settings(workspace_slug: str | None) -> tuple[int, list[str]]:
+    """The workspace's idle timeout in seconds and its approved external endpoints."""
     from agent.dashboard.workspace_settings import get_workspace_settings
 
     settings = await get_workspace_settings(workspace_slug)
-    return settings.browser_idle_timeout_minutes * 60
+    return settings.browser_idle_timeout_minutes * 60, settings.browser_approved_dev_endpoints
 
 
 async def ensure_session(
@@ -72,10 +75,12 @@ async def ensure_session(
     metadata = await get_sandbox_metadata(thread_id)
     if not browser_supported(metadata):
         raise BrowserUnsupportedError("Browser sessions need a cloud sandbox")
+    idle_timeout_seconds, approved_endpoints = await _session_settings(workspace_slug)
     session, created = await store.claim_start(
         thread_id,
         started_by=started_by,
-        idle_timeout_seconds=await _idle_timeout_seconds(workspace_slug),
+        idle_timeout_seconds=idle_timeout_seconds,
+        approved_endpoints=approved_endpoints,
     )
     if not created:
         if session.state == "starting":
@@ -115,16 +120,20 @@ async def _launch(session: BrowserSession, workspace_slug: str | None) -> Browse
             exc_info=True,
             extra={"browser_session_id": session.session_id},
         )
-        return await _failed(session, "launch_failed")
+        return await fail(session, "launch_failed")
     sandbox_id = backend.id
     if Bridge.bridge_id_of(sandbox_id) is not None:
-        return await _failed(session, "sandbox_unsupported")
+        return await fail(session, "sandbox_unsupported")
     bound = await store.bind_sandbox(session.session_id, sandbox_id)
     if bound is None:
         return await store.latest(session.thread_id) or session
     try:
         async with engine.connected(sandbox_id) as sandbox:
-            port = await engine.launch(sandbox, bound)
+            try:
+                port = await engine.launch(sandbox, bound)
+            except Exception:
+                await _discard(sandbox, bound)
+                raise
             ready = await store.mark_ready(session.session_id, stream_port=port)
             if ready is None:
                 # Stopped while launching: whoever stopped it may have closed too early.
@@ -132,27 +141,42 @@ async def _launch(session: BrowserSession, workspace_slug: str | None) -> Browse
                 return await store.latest(session.thread_id) or bound
             return ready
     except engine.SandboxLostError:
-        return await _failed(bound, "sandbox_lost")
+        return await fail(bound, "sandbox_lost")
+    except engine.EgressUnavailableError:
+        logger.warning(
+            "The sandbox cannot isolate the browser's network",
+            exc_info=True,
+            extra={"browser_session_id": session.session_id},
+        )
+        return await fail(bound, "egress_unavailable")
     except engine.EngineMissingError:
         logger.warning(
             "agent-browser is missing or too old in the sandbox",
             exc_info=True,
             extra={"browser_session_id": session.session_id},
         )
-        return await _failed(bound, "engine_missing")
+        return await fail(bound, "engine_missing")
     except Exception:
         logger.warning(
             "Browser launch failed",
             exc_info=True,
             extra={"browser_session_id": session.session_id},
         )
-        return await _failed(bound, "launch_failed")
+        return await fail(bound, "launch_failed")
 
 
-async def _failed(
-    session: BrowserSession,
-    reason: Literal["sandbox_lost", "sandbox_unsupported", "engine_missing", "launch_failed"],
-) -> BrowserSession:
+async def _discard(sandbox: AsyncSandbox, session: BrowserSession) -> None:
+    try:
+        await engine.close(sandbox, session)
+    except Exception:
+        logger.warning(
+            "Could not clean up after a failed browser launch",
+            exc_info=True,
+            extra={"browser_session_id": session.session_id},
+        )
+
+
+async def fail(session: BrowserSession, reason: FailureReason) -> BrowserSession:
     logger.info(
         "Browser session failed",
         extra={"browser_session_id": session.session_id, "browser_failure": reason},
@@ -172,7 +196,7 @@ async def check_session(session: BrowserSession) -> BrowserSession:
         current = None
     if current is not None and current == session.sandbox_id:
         return session
-    return await _failed(session, "sandbox_lost")
+    return await fail(session, "sandbox_lost")
 
 
 async def current(thread_id: str) -> BrowserSession | None:
@@ -259,13 +283,15 @@ async def _sweep_session(session: BrowserSession, now: datetime) -> SweepOutcome
     if session.state == "starting":
         if now - session.updated_at < _STALE_START:
             return "ok"
-        await _failed(session, "launch_failed")
+        await fail(session, "launch_failed")
         return "stale_start"
     if session.state == "stopping":
         if now - session.updated_at < _STALE_STOP:
             return "ok"
         await store.finish_stop(session.session_id)
         return "stale_stop"
+    if session.handoff != "none" and now - session.updated_at >= _STALE_HANDOFF:
+        await store.finish_handoff(session.session_id)
     if await _thread_closed(session.thread_id):
         await stop_session(session.thread_id, "thread_closed")
         return "thread_closed"

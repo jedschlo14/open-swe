@@ -44,6 +44,9 @@ STATE_TTL_SECONDS = 600
 HANDOFF_TTL_SECONDS = 120
 TERMINAL_TICKET_TTL_SECONDS = 60
 TERMINAL_TICKET_AUDIENCE = "open-swe-cloud-terminal"
+BROWSER_TICKET_TTL_SECONDS = 60
+BROWSER_TICKET_AUDIENCE = "open-swe-browser-live"
+BrowserTicketRole = Literal["view", "control"]
 JWT_ALG = "HS256"
 
 
@@ -79,6 +82,57 @@ def decode_terminal_ticket(token: str, *, thread_id: str) -> dict[str, Any]:
         raise HTTPException(401, "invalid terminal ticket")
     email = payload.get("email")
     return {"sub": login, "email": email if isinstance(email, str) else None}
+
+
+def issue_browser_ticket(
+    *, login: str, email: str | None, thread_id: str, role: BrowserTicketRole
+) -> str:
+    """A short-lived ticket for one live-view connection; the role caps what it may send."""
+    now = int(time.time())
+    payload = {
+        "aud": BROWSER_TICKET_AUDIENCE,
+        "sub": login,
+        "email": email,
+        "thread_id": thread_id,
+        "role": role,
+        "iat": now,
+        "exp": now + BROWSER_TICKET_TTL_SECONDS,
+    }
+    return jwt.encode(payload, _secret(), algorithm=JWT_ALG)
+
+
+class BrowserTicket(BaseModel):
+    login: str
+    email: str | None
+    role: BrowserTicketRole
+
+
+def decode_browser_ticket(token: str, *, thread_id: str) -> BrowserTicket:
+    try:
+        payload = jwt.decode(
+            token,
+            _secret(),
+            algorithms=[JWT_ALG],
+            audience=BROWSER_TICKET_AUDIENCE,
+            options={"require": ["aud", "sub", "thread_id", "role", "iat", "exp"]},
+        )
+    except jwt.PyJWTError as exc:
+        raise HTTPException(401, "invalid browser ticket") from exc
+    login, ticket_thread_id, role = (
+        payload.get("sub"),
+        payload.get("thread_id"),
+        payload.get("role"),
+    )
+    if (
+        not isinstance(login, str)
+        or not login
+        or not isinstance(ticket_thread_id, str)
+        or not hmac.compare_digest(ticket_thread_id, thread_id)
+        or role not in ("view", "control")
+    ):
+        raise HTTPException(401, "invalid browser ticket")
+    email = payload.get("email")
+    return BrowserTicket(login=login, email=email if isinstance(email, str) else None, role=role)
 
 
 GITHUB_APP_CLIENT_ID = ENV.GITHUB_APP_CLIENT_ID.get()
