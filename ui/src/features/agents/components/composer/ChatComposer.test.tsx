@@ -195,6 +195,27 @@ describe("ChatComposer stop button", () => {
   })
 })
 
+describe("ChatComposer drafts", () => {
+  it("restores unsent text for the same draft key after remounting", async () => {
+    Object.assign(Range.prototype, {
+      getBoundingClientRect: () => new DOMRect(),
+    })
+    renderComposer(false, {
+      draftKey: "thread-a",
+      restoreDraft: { key: 1, text: "half-typed idea", images: [] },
+    })
+    await screen.findByText("half-typed idea")
+    cleanup()
+
+    renderComposer(false, { draftKey: "thread-a" })
+    await screen.findByText("half-typed idea")
+    cleanup()
+
+    renderComposer(false, { draftKey: "thread-b" })
+    expect(screen.queryByText("half-typed idea")).toBeNull()
+  })
+})
+
 describe("ChatComposer options", () => {
   it("offers attachments without a plan-mode toggle", async () => {
     renderComposer(false)

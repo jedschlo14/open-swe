@@ -99,7 +99,15 @@ export interface RestoredDraft {
   images: Array<ImageChunk>
 }
 
+const composerDrafts = new Map<string, string>()
+
+function readComposerDraft(draftKey: string | undefined): string {
+  return draftKey ? (composerDrafts.get(draftKey) ?? "") : ""
+}
+
 export interface ChatComposerProps {
+  /** Keeps unsent text per key for the life of the page, across thread switches. */
+  draftKey?: string
   placeholder?: string
   autoFocus?: boolean
   compact?: boolean
@@ -252,6 +260,7 @@ export function buildCommandItems(
 
 /** Prompt editor with autocomplete, model selection, attachments, and send/stop controls. */
 export const ChatComposer = memo(function ChatComposer({
+  draftKey,
   placeholder = "Ask Open SWE to build, fix bugs, explore",
   autoFocus = false,
   compact = false,
@@ -293,8 +302,20 @@ export const ChatComposer = memo(function ChatComposer({
   contextUsage,
   routed,
 }: ChatComposerProps) {
-  const [value, setValue] = useState("")
-  const [cursor, setCursor] = useState(0)
+  const [value, setValue] = useState(() => readComposerDraft(draftKey))
+  const [cursor, setCursor] = useState(value.length)
+  const [loadedDraftKey, setLoadedDraftKey] = useState(draftKey)
+  if (loadedDraftKey !== draftKey) {
+    const stored = readComposerDraft(draftKey)
+    setLoadedDraftKey(draftKey)
+    setValue(stored)
+    setCursor(stored.length)
+  }
+  useEffect(() => {
+    if (!draftKey) return
+    if (value) composerDrafts.set(draftKey, value)
+    else composerDrafts.delete(draftKey)
+  }, [draftKey, value])
   const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>([])
   const [dragKind, setDragKind] = useState<"files" | "path" | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
