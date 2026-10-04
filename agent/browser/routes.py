@@ -34,6 +34,12 @@ class ConfirmationDecision(BaseModel):
     approve: bool
 
 
+class HandbackRequest(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    save_sign_in: bool = False
+
+
 class BrowserLiveConnection(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -81,8 +87,9 @@ def _view(
         supported=manager.browser_supported(metadata),
         viewer=login,
     )
-    if view.viewer_controls and _owns_private_thread(metadata, login):
+    if session and view.viewer_controls and _owns_private_thread(metadata, login):
         view.can_save_sign_in = True
+        view.approved_endpoints = list(session.approved_endpoints)
     return view
 
 
@@ -247,10 +254,18 @@ async def api_browser_takeover(
 
 @router.post("/threads/{thread_id}/browser/handback")
 async def api_browser_handback(
-    thread_id: str, session: dict[str, Any] = SESSION_DEP
+    thread_id: str,
+    request: HandbackRequest | None = None,
+    session: dict[str, Any] = SESSION_DEP,
 ) -> BrowserSessionView:
-    """Return the lease to the agent; any thread writer may, so control never strands."""
+    """Return the lease to the agent, first saving the page's sign-in when asked.
+
+    Any thread writer may hand back, so control never strands; a failed save keeps
+    the caller in control so they can retry or hand back without it.
+    """
     metadata = await _writable(thread_id, session)
+    if request is not None and request.save_sign_in:
+        await _save_sign_in(thread_id, metadata, session["sub"])
     try:
         returned = await lease.hand_back(thread_id, session["sub"])
     except lease.LeaseConflictError as exc:
@@ -282,7 +297,12 @@ async def api_browser_save_sign_in(
 ) -> sign_ins.SavedSignIn:
     """Save the sign-in on the page the caller is controlling, for reuse in their private threads."""
     metadata = await _writable(thread_id, session)
-    login = session["sub"]
+    return await _save_sign_in(thread_id, metadata, session["sub"])
+
+
+async def _save_sign_in(
+    thread_id: str, metadata: dict[str, JsonValue], login: str
+) -> sign_ins.SavedSignIn:
     if not _owns_private_thread(metadata, login):
         raise HTTPException(403, "sign-ins can only be saved from a private thread you own")
     current = await manager.current(thread_id)

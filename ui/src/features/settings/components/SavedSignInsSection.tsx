@@ -55,7 +55,7 @@ export function SavedSignInsSection() {
         <div className="px-4 py-3.5 text-xs text-muted-foreground">
           {signIns.isPending
             ? "Loading…"
-            : "None saved. Take control of a thread's browser, sign in, and choose Save sign-in."}
+            : "None saved. Take control of a thread's browser, sign in, then tick Remember my sign-in when you hand control back."}
         </div>
       ) : (
         items.map((signIn) => (
