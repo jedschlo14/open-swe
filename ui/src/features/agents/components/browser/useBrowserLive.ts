@@ -1,19 +1,19 @@
+import type { eventWithTime } from "@rrweb/types"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { agentsApi } from "@/features/agents/lib/api"
-import {
-  BrowserVideoPlayer,
-  canPlayLiveView,
-} from "@/features/agents/components/browser/browserVideo"
+import { parseFontCatalog } from "@/features/agents/components/browser/mirror/fontCatalog"
+import { MirrorPlayer } from "@/features/agents/components/browser/mirror/MirrorPlayer"
+import type {
+  MirrorHit,
+  MirrorViewport,
+} from "@/features/agents/components/browser/mirror/MirrorPlayer"
 import type { ViewportSize } from "@/features/agents/components/browser/browserViewport"
 import type { BrowserLiveConnection } from "@/features/agents/lib/api"
 import {
-  cursorStyle,
   isRecord,
-  parseGeometry,
   parsePage,
-  type BrowserGeometry,
   type BrowserLiveRecord,
   type BrowserPage,
 } from "@/features/agents/components/browser/browserMessages"
@@ -24,7 +24,12 @@ export type BrowserLiveStatus =
   | "live"
   | "ended"
   | "error"
-  | "unsupported"
+
+export interface BrowserAnchor {
+  id: number
+  fx: number
+  fy: number
+}
 
 export type BrowserClientMessage =
   | {
@@ -35,8 +40,10 @@ export type BrowserClientMessage =
       button?: number
       dx?: number
       dy?: number
+      anchor?: BrowserAnchor
     }
   | { type: "key"; action: "down" | "up"; key: string; code: string }
+  | { type: "choice"; id: number; value: string }
   | { type: "resize"; width: number; height: number }
   | {
       type: "navigate"
@@ -49,6 +56,7 @@ export type BrowserClientMessage =
 const RETRY_DELAY_MS = 3_000
 const RESIZE_DEBOUNCE_MS = 120
 const HIDDEN_DISCONNECT_MS = 20_000
+const FONTS_WAIT_MS = 3_000
 /** Capacity and server-side failures are worth one more try; access changes are not. */
 const RETRYABLE_CLOSE_CODES = new Set([1011, 1013])
 
@@ -83,10 +91,18 @@ async function writeClipboard(text: string) {
   }
 }
 
+/** Where the page's resources load from: the live socket's own route, under the ticket the server issued. */
+function assetBaseFor(socketUrl: string, ticket: string): string {
+  const url = new URL(socketUrl)
+  url.protocol = url.protocol === "wss:" ? "https:" : "http:"
+  url.pathname = url.pathname.replace(/\/live$/, "/assets/") + `${ticket}/`
+  return url.toString()
+}
+
 /**
- * Streams a thread browser onto a canvas as H.264 video and carries the
- * controller's input back. The server decides who may send input; this hook
- * only transports it.
+ * Rebuilds a thread browser's page as a real document from the events the
+ * server relays, and carries the controller's input back. The server decides
+ * who may send input; this hook only transports it.
  */
 export function useBrowserLive(
   threadId: string,
@@ -94,24 +110,27 @@ export function useBrowserLive(
   panelViewport: ViewportSize | null
 ) {
   const suspended = usePageHiddenFor(HIDDEN_DISCONNECT_MS)
-  const unsupported = !canPlayLiveView()
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [root, setRoot] = useState<HTMLDivElement | null>(null)
   const [status, setStatus] = useState<BrowserLiveStatus>("idle")
   const [role, setRole] = useState<BrowserLiveConnection["role"] | null>(null)
-  const [cursor, setCursor] = useState("default")
   const [page, setPage] = useState<BrowserPage | null>(null)
-  const [geometry, setGeometry] = useState<BrowserGeometry | null>(null)
+  const [viewport, setViewport] = useState<MirrorViewport | null>(null)
   const [attempt, setAttempt] = useState(0)
 
   const socketRef = useRef<WebSocket | null>(null)
-  const geometryRef = useRef<BrowserGeometry | null>(null)
-  const attachCanvas = useCallback((node: HTMLCanvasElement | null) => {
-    canvasRef.current = node
-  }, [])
+  const playerRef = useRef<MirrorPlayer | null>(null)
   const send = useCallback((message: BrowserClientMessage) => {
     const socket = socketRef.current
     if (socket?.readyState === WebSocket.OPEN)
       socket.send(JSON.stringify(message))
+  }, [])
+  const hit = useCallback(
+    (x: number, y: number): MirrorHit | null =>
+      playerRef.current?.hitTest(x, y) ?? null,
+    []
+  )
+  const setDriving = useCallback((driving: boolean) => {
+    playerRef.current?.setDriving(driving)
   }, [])
 
   const width = panelViewport?.width
@@ -126,40 +145,70 @@ export function useBrowserLive(
   }, [status, role, width, height, send])
 
   useEffect(() => {
-    if (!sessionId || suspended) return
-    if (unsupported) return
+    if (!sessionId || suspended || !root) return
     let disposed = false
     let socket: WebSocket | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
-    const player = new BrowserVideoPlayer(
-      () => canvasRef.current,
-      (error) => {
-        console.debug("The live view's decoder failed; reconnecting", error)
-        if (!disposed) setAttempt((count) => count + 1)
-      }
-    )
+    let fontsTimer: ReturnType<typeof setTimeout> | null = null
+    let frame = 0
+    let fontsReady = false
+    let queued: eventWithTime[] = []
 
-    const handleMessage = (message: BrowserLiveRecord) => {
+    const flush = () => {
+      frame = 0
+      if (!fontsReady) return
+      const events = queued
+      queued = []
+      if (!events.length) return
+      try {
+        playerRef.current?.apply(events)
+      } catch (error) {
+        console.debug(
+          "The live view couldn't apply page events; reconnecting",
+          error
+        )
+        if (!disposed && !retry)
+          retry = setTimeout(
+            () => setAttempt((count) => count + 1),
+            RETRY_DELAY_MS
+          )
+      }
+    }
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(flush)
+    }
+    const markFontsReady = () => {
+      fontsReady = true
+      if (fontsTimer) clearTimeout(fontsTimer)
+      fontsTimer = null
+      schedule()
+    }
+
+    const handleMessage = (
+      message: BrowserLiveRecord,
+      player: MirrorPlayer,
+      socketUrl: string
+    ) => {
       switch (message.type) {
-        case "status": {
-          const next = parseGeometry(message)
-          if (next) {
-            geometryRef.current = next
-            setGeometry(next)
-          }
+        case "reset":
+          queued = []
+          player.reset()
           return
-        }
-        case "cursor": {
-          const scale = geometryRef.current
-            ? geometryRef.current.width / geometryRef.current.cssWidth
-            : 1
-          const next = cursorStyle(message, scale)
-          if (next) setCursor(next)
-          return
-        }
         case "page": {
           const next = parsePage(message)
           if (next) setPage(next)
+          return
+        }
+        case "assets":
+          if (typeof message.ticket === "string")
+            player.setAssetBase(assetBaseFor(socketUrl, message.ticket))
+          return
+        case "fonts": {
+          const catalog = parseFontCatalog(message)
+          player.setCatalog(
+            Object.keys(catalog.families).length ? catalog : null
+          )
+          markFontsReady()
           return
         }
         case "clipboard":
@@ -172,71 +221,87 @@ export function useBrowserLive(
       }
     }
 
-    const connect = () => {
+    const connect = async () => {
       setStatus("connecting")
-      agentsApi
-        .connectBrowserLive(threadId)
-        .then((connection) => {
+      fontsReady = false
+      queued = []
+      playerRef.current?.destroy()
+      playerRef.current = null
+      try {
+        const connection = await agentsApi.connectBrowserLive(threadId)
+        if (disposed) return
+        const player = await MirrorPlayer.create(root, {
+          assetBase: "",
+          onViewport: setViewport,
+        })
+        if (disposed) {
+          player.destroy()
+          return
+        }
+        playerRef.current = player
+        setRole(connection.role)
+        const ws = new WebSocket(connection.url, [
+          connection.protocol,
+          connection.ticket,
+        ])
+        socket = ws
+        socketRef.current = ws
+        ws.onopen = () => {
           if (disposed) return
-          setRole(connection.role)
-          const ws = new WebSocket(connection.url, [
-            connection.protocol,
-            connection.ticket,
-          ])
-          ws.binaryType = "arraybuffer"
-          socket = ws
-          socketRef.current = ws
-          ws.onopen = () => {
-            if (disposed) return
-            setCursor("default")
-            setStatus("live")
-          }
-          ws.onmessage = (event) => {
-            if (disposed) return
-            if (event.data instanceof ArrayBuffer) {
-              player.push(event.data)
-              return
+          fontsTimer = setTimeout(markFontsReady, FONTS_WAIT_MS)
+          setStatus("live")
+        }
+        ws.onmessage = (event) => {
+          if (disposed || typeof event.data !== "string") return
+          try {
+            const message: unknown = JSON.parse(event.data)
+            if (Array.isArray(message)) {
+              queued.push(...(message as eventWithTime[]))
+              schedule()
+            } else if (isRecord(message)) {
+              handleMessage(message, player, connection.url)
             }
-            if (typeof event.data !== "string") return
-            try {
-              const message: unknown = JSON.parse(event.data)
-              if (isRecord(message)) handleMessage(message)
-            } catch (error) {
-              console.debug("Ignored an unreadable live view message", error)
-            }
+          } catch (error) {
+            console.debug("Ignored an unreadable live view message", error)
           }
-          ws.onclose = (event) => {
-            if (disposed) return
-            if (RETRYABLE_CLOSE_CODES.has(event.code)) {
-              setStatus("connecting")
-              retry = setTimeout(connect, RETRY_DELAY_MS)
-              return
-            }
-            setStatus(event.code === 1000 ? "ended" : "error")
+        }
+        ws.onclose = (event) => {
+          if (disposed) return
+          if (RETRYABLE_CLOSE_CODES.has(event.code)) {
+            setStatus("connecting")
+            retry = setTimeout(() => void connect(), RETRY_DELAY_MS)
+            return
           }
-        })
-        .catch(() => {
-          if (!disposed) setStatus("error")
-        })
+          setStatus(event.code === 1000 ? "ended" : "error")
+        }
+      } catch (error) {
+        console.debug("Couldn't open the live view", error)
+        if (!disposed) setStatus("error")
+      }
     }
 
-    connect()
+    void connect()
     return () => {
       disposed = true
       if (retry) clearTimeout(retry)
+      if (fontsTimer) clearTimeout(fontsTimer)
+      if (frame) cancelAnimationFrame(frame)
       socketRef.current = null
       socket?.close()
-      player.dispose()
+      playerRef.current?.destroy()
+      playerRef.current = null
+      setViewport(null)
     }
-  }, [threadId, sessionId, suspended, unsupported, attempt])
+  }, [threadId, sessionId, suspended, root, attempt])
 
   return {
-    attachCanvas,
+    attachRoot: setRoot,
     send,
-    cursor,
+    hit,
+    setDriving,
     page: sessionId ? page : null,
-    geometry: sessionId ? geometry : null,
-    status: !sessionId ? "idle" : unsupported ? "unsupported" : status,
+    viewport: sessionId ? viewport : null,
+    status: !sessionId ? "idle" : status,
     role: sessionId ? role : null,
   }
 }
