@@ -43,7 +43,9 @@ export function UserMessage({ message }: { message: Message }) {
       data-message-sender-kind={message.structuredSenderKind}
       data-message-surface={message.structuredSurface}
     >
-      <div className="max-w-[80%]">
+      <div
+        className={`flex max-w-[80%] flex-col ${isSystem ? "items-start" : "items-end"}`}
+      >
         {isSystem ? (
           <button
             type="button"
