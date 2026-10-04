@@ -164,6 +164,8 @@ async def api_browser_live_connect(
     current = await manager.current(thread_id)
     if current is None or current.state != "ready":
         raise HTTPException(409, "the browser is not running")
+    if not current.live_view:
+        raise HTTPException(409, "this browser has no live view")
     role = _role(metadata, session["sub"], session.get("email"))
     response.headers["Cache-Control"] = "no-store"
     return BrowserLiveConnection(

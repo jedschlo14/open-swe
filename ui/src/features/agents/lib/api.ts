@@ -157,6 +157,8 @@ export interface BrowserSessionView {
   /** Whether the person asking holds the lease and may drive the page. */
   viewerControls: boolean
   pendingConfirmation: BrowserPendingConfirmation | null
+  /** Whether the browser runs on a display the dashboard can stream. */
+  liveView: boolean
 }
 
 export type BrowserSessionAction =
