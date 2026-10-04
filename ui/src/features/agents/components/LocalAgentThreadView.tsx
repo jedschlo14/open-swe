@@ -529,6 +529,7 @@ export function LocalAgentThreadView({ sessionId }: { sessionId: string }) {
               </div>
             )}
             <AgentPromptBar
+              draftKey={`local:${thread.id}`}
               activeRun={{ threadId: thread.id, running: isRunning }}
               busy={isRunning}
               compact

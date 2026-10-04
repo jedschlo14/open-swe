@@ -99,7 +99,17 @@ export interface RestoredDraft {
   images: Array<ImageChunk>
 }
 
+interface ComposerDraft {
+  value: string
+  images: Array<ImageChunk>
+}
+
+/** Unsent composer content by `draftKey`; lives until the page reloads. */
+const composerDrafts = new Map<string, ComposerDraft>()
+
 export interface ChatComposerProps {
+  /** Keeps unsent text and attachments per key across remounts and key changes. */
+  draftKey?: string
   placeholder?: string
   autoFocus?: boolean
   compact?: boolean
@@ -252,6 +262,7 @@ export function buildCommandItems(
 
 /** Prompt editor with autocomplete, model selection, attachments, and send/stop controls. */
 export const ChatComposer = memo(function ChatComposer({
+  draftKey,
   placeholder = "Ask Open SWE to build, fix bugs, explore",
   autoFocus = false,
   compact = false,
@@ -293,9 +304,20 @@ export const ChatComposer = memo(function ChatComposer({
   contextUsage,
   routed,
 }: ChatComposerProps) {
-  const [value, setValue] = useState("")
-  const [cursor, setCursor] = useState(0)
-  const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>([])
+  const initialDraft = draftKey ? composerDrafts.get(draftKey) : undefined
+  const [value, setValue] = useState(initialDraft?.value ?? "")
+  const [cursor, setCursor] = useState(initialDraft?.value.length ?? 0)
+  const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>(
+    initialDraft?.images ?? []
+  )
+  const [loadedDraftKey, setLoadedDraftKey] = useState(draftKey)
+  if (loadedDraftKey !== draftKey) {
+    const draft = draftKey ? composerDrafts.get(draftKey) : undefined
+    setLoadedDraftKey(draftKey)
+    setValue(draft?.value ?? "")
+    setCursor(draft?.value.length ?? 0)
+    setPendingImages(draft?.images ?? [])
+  }
   const [dragKind, setDragKind] = useState<"files" | "path" | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [activeItemId, setActiveItemId] = useState<string | null>(null)
@@ -344,6 +366,15 @@ export const ChatComposer = memo(function ChatComposer({
     [activeRun?.running]
   )
   useRegisterAppCommands(composerShortcuts)
+
+  useEffect(() => {
+    if (!draftKey || loadedDraftKey !== draftKey) return
+    if (value.length === 0 && pendingImages.length === 0) {
+      composerDrafts.delete(draftKey)
+    } else {
+      composerDrafts.set(draftKey, { value, images: pendingImages })
+    }
+  }, [draftKey, loadedDraftKey, pendingImages, value])
 
   const editorRef = useRef<ComposerPromptEditorHandle | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
