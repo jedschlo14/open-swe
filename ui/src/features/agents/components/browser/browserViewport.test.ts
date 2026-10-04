@@ -1,37 +1,28 @@
 import { describe, expect, it } from "vitest"
 
-import { fitViewport } from "@/features/agents/components/browser/browserViewport"
+import { viewportFor } from "@/features/agents/components/browser/browserViewport"
 
-describe("fitViewport", () => {
-  it("uses the panel's size when it is within the supported range", () => {
-    expect(fitViewport({ width: 1200, height: 800 })).toEqual({
-      width: 1200,
-      height: 800,
+describe("viewportFor", () => {
+  it("asks for the panel's own size so the page is not scaled", () => {
+    expect(viewportFor({ width: 733, height: 601 })).toEqual({
+      width: 732,
+      height: 600,
     })
   })
 
-  it("scales a narrow panel up to a usable layout, keeping its aspect ratio", () => {
-    expect(fitViewport({ width: 400, height: 700 })).toEqual({
-      width: 800,
+  it("keeps the page within what the browser supports", () => {
+    expect(viewportFor({ width: 5000, height: 4000 })).toEqual({
+      width: 1920,
       height: 1200,
     })
-  })
-
-  it("scales a very large panel down to the supported maximum", () => {
-    expect(fitViewport({ width: 3840, height: 1920 })).toEqual({
-      width: 1920,
-      height: 960,
+    expect(viewportFor({ width: 200, height: 100 })).toEqual({
+      width: 320,
+      height: 240,
     })
   })
 
-  it("snaps to a step so a drag does not resize the page per pixel", () => {
-    expect(fitViewport({ width: 1001, height: 703 })).toEqual(
-      fitViewport({ width: 1005, height: 699 })
-    )
-  })
-
-  it("returns null for a hidden or collapsed panel", () => {
-    expect(fitViewport({ width: 0, height: 0 })).toBeNull()
-    expect(fitViewport({ width: 900, height: 10 })).toBeNull()
+  it("leaves the page alone while the panel is hidden", () => {
+    expect(viewportFor({ width: 0, height: 0 })).toBeNull()
+    expect(viewportFor({ width: Number.NaN, height: 500 })).toBeNull()
   })
 })
