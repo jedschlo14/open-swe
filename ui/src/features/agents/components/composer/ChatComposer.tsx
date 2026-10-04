@@ -27,6 +27,7 @@ import type {
   ComposerCommandKey,
   ComposerPromptEditorHandle,
 } from "./ComposerPromptEditor"
+import { readComposerDraft, writeComposerDraft } from "./composerDrafts"
 import type { ComposerSlashCommand, ComposerTrigger } from "./composerTrigger"
 import type { RunTarget } from "./RunTargetSelector"
 import type {
@@ -101,6 +102,8 @@ export interface RestoredDraft {
 
 export interface ChatComposerProps {
   placeholder?: string
+  /** Keeps unsent text and attachments in memory under this key until the page reloads. */
+  draftKey?: string
   autoFocus?: boolean
   compact?: boolean
   disabled?: boolean
@@ -253,6 +256,7 @@ export function buildCommandItems(
 /** Prompt editor with autocomplete, model selection, attachments, and send/stop controls. */
 export const ChatComposer = memo(function ChatComposer({
   placeholder = "Ask Open SWE to build, fix bugs, explore",
+  draftKey,
   autoFocus = false,
   compact = false,
   disabled = false,
@@ -293,9 +297,12 @@ export const ChatComposer = memo(function ChatComposer({
   contextUsage,
   routed,
 }: ChatComposerProps) {
-  const [value, setValue] = useState("")
-  const [cursor, setCursor] = useState(0)
-  const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>([])
+  const [initialDraft] = useState(() => readComposerDraft(draftKey))
+  const [value, setValue] = useState(initialDraft?.value ?? "")
+  const [cursor, setCursor] = useState(initialDraft?.value.length ?? 0)
+  const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>(
+    initialDraft?.images ?? []
+  )
   const [dragKind, setDragKind] = useState<"files" | "path" | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [activeItemId, setActiveItemId] = useState<string | null>(null)
@@ -397,6 +404,10 @@ export const ChatComposer = memo(function ChatComposer({
     if (!selection || pendingImages.length === 0) return true
     return models.some((m) => m.id === selection.modelId && m.supports_images)
   }, [models, pendingImages.length, selection])
+
+  useEffect(() => {
+    writeComposerDraft(draftKey, { value, images: pendingImages })
+  }, [draftKey, value, pendingImages])
 
   const composerEmpty = value.trim().length === 0 && pendingImages.length === 0
   const canSubmit =
