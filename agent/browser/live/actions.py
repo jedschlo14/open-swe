@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from langsmith.sandbox import AsyncSandbox
 
 from agent.browser import engine, policy, store
-from agent.browser.live.messages import CopyMessage, NavigateMessage, PasteMessage
+from agent.browser.live.messages import CopyMessage, NavigateMessage
 from agent.browser.models import BrowserSession
 from agent.browser.ops import NavigateOp, commands
 
@@ -35,9 +35,6 @@ class PersonActions:
     async def copy(self, _message: CopyMessage) -> None:
         text = await engine.selection_text(self._sandbox, self._session)
         self._notify({"type": "clipboard", "text": text})
-
-    async def paste(self, message: PasteMessage) -> None:
-        await engine.insert_text(self._sandbox, self._session, message.text)
 
     async def navigate(self, message: NavigateMessage) -> None:
         if message.action != "go":

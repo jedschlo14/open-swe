@@ -676,6 +676,8 @@ class Mirror:
             await self.mouse(message)
         elif kind == "key":
             await self.key(message)
+        elif kind == "paste":
+            await self.paste(message)
         elif kind == "choice":
             await self.choice(message)
 
@@ -777,6 +779,11 @@ class Mirror:
         else:
             params["type"] = "rawKeyDown"
         await self.command("Input.dispatchKeyEvent", params)
+
+    async def paste(self, message: dict[str, object]) -> None:
+        text = message.get("text")
+        if isinstance(text, str) and text:
+            await self.command("Input.insertText", {"text": text})
 
     async def choice(self, message: dict[str, object]) -> None:
         node, value = message.get("id"), message.get("value")

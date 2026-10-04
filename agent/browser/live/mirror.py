@@ -92,12 +92,15 @@ async def _upstream(
         if not await gate.allows(discrete):
             continue
         match message:
-            case messages.MouseMessage() | messages.KeyMessage() | messages.ChoiceMessage():
+            case (
+                messages.MouseMessage()
+                | messages.KeyMessage()
+                | messages.PasteMessage()
+                | messages.ChoiceMessage()
+            ):
                 bridge.write_json(writer, bridge.KIND_INPUT, message.model_dump(exclude_none=True))
             case messages.CopyMessage():
                 await actions.copy(message)
-            case messages.PasteMessage():
-                queue.put_nowait(lambda m=message: actions.paste(m))
             case messages.NavigateMessage():
                 queue.put_nowait(lambda m=message: actions.navigate(m))
         await writer.drain()

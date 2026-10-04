@@ -352,11 +352,6 @@ async def selection_text(sandbox: AsyncSandbox, session: BrowserSession) -> str:
     return result[:MAX_SELECTION_CHARS] if isinstance(result, str) else ""
 
 
-async def insert_text(sandbox: AsyncSandbox, session: BrowserSession, text: str) -> None:
-    """Insert text at the focused element as a whole, for a person's paste or composed input."""
-    await run_command(sandbox, session, ["keyboard", "inserttext", text[:MAX_TEXT_CHARS]])
-
-
 def _to_viewport_pixels(image: bytes) -> bytes:
     """Scale a device-pixel capture down to viewport pixels, the space clicks use."""
     with Image.open(io.BytesIO(image)) as source:
