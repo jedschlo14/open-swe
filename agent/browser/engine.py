@@ -41,6 +41,8 @@ DAEMON_IDLE_GRACE_MS = 10 * 60 * 1000
 VIEWPORT_WIDTH = 1440
 VIEWPORT_HEIGHT = 900
 # Rendered at twice the viewport so the live view stays sharp on high-density (4K) displays.
+# Chrome's screencast only reaches the window's real scale factor, so the emulated one set by
+# `set viewport` is not enough: the stream stays at CSS size unless Chrome itself is launched at 2x.
 DEVICE_SCALE_FACTOR = 2
 _SCREENSHOT_QUALITY = 70
 _LAUNCH_TIMEOUT_SECONDS = 120
@@ -104,6 +106,7 @@ def _env(session: BrowserSession) -> dict[str, str]:
         "AGENT_BROWSER_PROXY_BYPASS": "<-loopback>",
         "AGENT_BROWSER_ALLOWED_DOMAINS": allowed_domains(session.approved_endpoints),
         "AGENT_BROWSER_MAX_OUTPUT": str(MAX_OUTPUT_CHARS),
+        "AGENT_BROWSER_ARGS": f"--force-device-scale-factor={DEVICE_SCALE_FACTOR}",
         "AGENT_BROWSER_STREAM_QUALITY": "80",
         # Both caps must be set, or the stream downscales frames to the viewport's CSS size.
         "AGENT_BROWSER_STREAM_MAX_WIDTH": str(VIEWPORT_WIDTH * DEVICE_SCALE_FACTOR),
