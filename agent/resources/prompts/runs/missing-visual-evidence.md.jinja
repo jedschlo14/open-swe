@@ -1,0 +1,15 @@
+{% if omitted -%}
+PR not created. This branch changes files a reviewer would see in a browser ({{ files }}). The PR body says screenshots were omitted, but you have not opened the browser in this thread. An omission is accepted only after a real attempt: "it needs sign-in, a backend, or real data" is not a reason on its own.
+{%- else -%}
+PR not created. This branch changes files a reviewer would see in a browser ({{ files }}), but the PR body has no before/after screenshots.
+{%- endif %}
+
+
+Add them now, then call `open_pull_request` again with the returned Markdown in a two-column Before/After table:
+1. Find how this repository runs its UI without production services. Check `AGENTS.md`, the README and contributing docs, repository skills, the package manifest's scripts, and any end-to-end or test harness with mock backends, fake sign-in, or seeded data. Use it if it exists.
+2. Otherwise, render the changed component on a temporary page or route with representative props that match the user's description or screenshot.
+3. Load the Browser tools. For `before`, check out the base branch's version of the changed files (`git checkout origin/<base> -- <files>`), open the page with `browser_navigate`, and publish it with `browser_publish_screenshot` and `label: "before"`.
+4. Restore your version (`git checkout HEAD -- <files>`), reload the same page at the same viewport, and publish the `after` capture.
+5. Delete any temporary page or route and confirm `git status` is clean before you continue.
+
+Skip this only when the change has no visible effect, the page still cannot be rendered after you tried in the browser, or it would show secrets or other people's data. Then add a line starting `Before/after screenshots omitted:` with what you tried and why it failed, and call `open_pull_request` again.

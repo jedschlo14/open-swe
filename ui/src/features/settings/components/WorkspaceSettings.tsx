@@ -29,6 +29,7 @@ import {
   type WorkspaceRecord,
 } from "@/lib/api"
 import { MCPConnectionsSection } from "./MCPConnectionsSection"
+import { BrowserSessionsSection } from "./BrowserSessionsSection"
 import { ExpeditedReviewSection } from "./ExpeditedReviewSection"
 import { ReviewSettings } from "./ReviewSettings"
 import {
@@ -318,6 +319,7 @@ export function WorkspaceSettingsPanel({
       <LLMGatewaySection scope={scope} />
       <ReviewSettings scope={scope} canEdit={canEdit} />
       <ExpeditedReviewSection scope={scope} />
+      <BrowserSessionsSection scope={scope} />
       <MCPConnectionsSection key={slug} scope="workspace" workspace={slug} />
       {canEdit && slug !== DEFAULT_WORKSPACE_SLUG && (
         <SettingsSection

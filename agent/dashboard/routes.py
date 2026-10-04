@@ -6,6 +6,7 @@ from agent.analytics.routes import router as analytics_router
 from agent.api_keys.routes import router as api_keys_router
 from agent.audit_logs.routes import router as audit_logs_router
 from agent.bridge.routes import router as bridge_router
+from agent.browser.routes import router as browser_router
 from agent.dashboard.agent_instructions import router as agent_instructions_router
 from agent.dashboard.auth_routes import router as auth_router
 from agent.dashboard.client_errors import router as client_errors_router
@@ -67,3 +68,4 @@ router.include_router(threads_router)
 router.include_router(transcript_router)
 router.include_router(api_keys_router)
 router.include_router(bridge_router)
+router.include_router(browser_router)

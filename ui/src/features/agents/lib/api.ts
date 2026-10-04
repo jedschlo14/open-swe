@@ -112,6 +112,82 @@ export interface CloudTerminalConnection {
   ticket: string
 }
 
+export type BrowserSessionState =
+  | "starting"
+  | "ready"
+  | "stopping"
+  | "stopped"
+  | "failed"
+
+export type BrowserFailureReason =
+  | "sandbox_lost"
+  | "sandbox_unsupported"
+  | "engine_missing"
+  | "egress_unavailable"
+  | "launch_failed"
+
+export type BrowserStopReason =
+  | "requested"
+  | "thread_closed"
+  | "idle_timeout"
+  | "sandbox_recreated"
+
+export interface BrowserPendingConfirmation {
+  confirmationId: string
+  reason: string
+  description: string
+  status: "pending" | "approved"
+  requestedAt: string
+  decidedBy: string | null
+}
+
+export interface BrowserSessionView {
+  state: BrowserSessionState | null
+  sessionId: string | null
+  failureReason: BrowserFailureReason | null
+  stopReason: BrowserStopReason | null
+  startedBy: string | null
+  startedAt: string | null
+  expiresAt: string | null
+  expiryWarning: boolean
+  supported: boolean
+  controller: "agent" | "user" | null
+  controllerLogin: string | null
+  handoff: "none" | "takeover" | "handback" | null
+  /** Whether the person asking holds the lease and may drive the page. */
+  viewerControls: boolean
+  /** Whether the person asking may save the page's sign-in for their private threads. */
+  canSaveSignIn: boolean
+  pendingConfirmation: BrowserPendingConfirmation | null
+  /** Whether the browser runs on a display the dashboard can stream. */
+  liveView: boolean
+}
+
+export const SAVED_SIGN_INS_QUERY_KEY = ["browserSavedSignIns"] as const
+
+export interface SavedBrowserSignIn {
+  signInId: string
+  origin: string
+  createdAt: string
+  expiresAt: string
+  lastUsedAt: string | null
+  status: "active" | "expired"
+}
+
+export type BrowserSessionAction =
+  | "start"
+  | "stop"
+  | "keepalive"
+  | "takeover"
+  | "handback"
+
+export interface BrowserLiveConnection {
+  url: string
+  protocol: string
+  ticket: string
+  role: "view" | "control"
+}
+
 export type ThreadScope = "all" | "interactive" | "automation"
 export type ThreadSortBy = "created_at" | "updated_at"
 
@@ -463,6 +539,41 @@ export const agentsApi = {
   connectCloudTerminal: (threadId: string) =>
     agentsRequest<CloudTerminalConnection>(
       `/threads/${encodeURIComponent(threadId)}/terminal/connect`,
+      { method: "POST" }
+    ),
+  getBrowser: (threadId: string) =>
+    agentsRequest<BrowserSessionView>(
+      `/threads/${encodeURIComponent(threadId)}/browser`
+    ),
+  browserAction: (threadId: string, action: BrowserSessionAction) =>
+    agentsRequest<BrowserSessionView>(
+      `/threads/${encodeURIComponent(threadId)}/browser/${action}`,
+      { method: "POST" }
+    ),
+  decideBrowserConfirmation: (
+    threadId: string,
+    confirmationId: string,
+    approve: boolean
+  ) =>
+    agentsRequest<BrowserSessionView>(
+      `/threads/${encodeURIComponent(threadId)}/browser/confirmations/${encodeURIComponent(confirmationId)}`,
+      { method: "POST", body: JSON.stringify({ approve }) }
+    ),
+  saveBrowserSignIn: (threadId: string) =>
+    agentsRequest<SavedBrowserSignIn>(
+      `/threads/${encodeURIComponent(threadId)}/browser/saved-sign-in`,
+      { method: "POST" }
+    ),
+  getSavedBrowserSignIns: () =>
+    agentsRequest<Array<SavedBrowserSignIn>>("/browser/saved-sign-ins"),
+  deleteSavedBrowserSignIn: (signInId: string) =>
+    agentsRequest<void>(
+      `/browser/saved-sign-ins/${encodeURIComponent(signInId)}`,
+      { method: "DELETE" }
+    ),
+  connectBrowserLive: (threadId: string) =>
+    agentsRequest<BrowserLiveConnection>(
+      `/threads/${encodeURIComponent(threadId)}/browser/live/connect`,
       { method: "POST" }
     ),
 }

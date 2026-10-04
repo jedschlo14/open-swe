@@ -17,6 +17,7 @@ from langgraph_sdk import get_client
 from agent.bridge.backend import BridgeSandboxBackend
 from agent.bridge.store import Bridge
 from agent.config import ENV
+from agent.database import postgres
 from agent.github.proxy import get_recorded_proxy_base_config, record_proxy_token_expiry
 from agent.github.sandbox_access import SandboxGitHubAccess, workspace_token
 from agent.sandboxes.providers.langsmith import configure_sandbox_proxy, get_sandbox_proxy_config
@@ -388,9 +389,37 @@ async def ensure_sandbox_for_thread(
 ) -> SandboxBackendProtocol:
     """Get-or-create a healthy sandbox bound to ``thread_id``.
 
-    Three cases (dispatch uses ``multitask_strategy="interrupt"``, so a thread
-    never provisions two sandboxes concurrently — no cross-process sentinel is
-    needed):
+    Runs never overlap on a thread, but callers outside a run (a dashboard
+    browser start, a Slack attachment) can race one, so creating a thread's
+    first sandbox holds a per-thread advisory lock and re-reads the binding
+    once it has it.
+    """
+    if not postgres.configured() or (await get_sandbox_metadata(thread_id)).get("sandbox_id"):
+        return await _ensure_sandbox_for_thread(
+            thread_id,
+            github_proxy_repositories=github_proxy_repositories,
+            workspace_slug=workspace_slug,
+            allow_replacement=allow_replacement,
+        )
+    async with postgres.advisory_lock(f"sandbox-create:{thread_id}"):
+        return await _ensure_sandbox_for_thread(
+            thread_id,
+            github_proxy_repositories=github_proxy_repositories,
+            workspace_slug=workspace_slug,
+            allow_replacement=allow_replacement,
+        )
+
+
+async def _ensure_sandbox_for_thread(
+    thread_id: str,
+    *,
+    github_proxy_repositories: Sequence[str] | None,
+    workspace_slug: str | None,
+    allow_replacement: bool,
+) -> SandboxBackendProtocol:
+    """Get-or-create a healthy sandbox bound to ``thread_id``.
+
+    Three cases:
 
     1. Metadata has an id -> reuse this process's connection to that sandbox if
        it has one, else reconnect; then refresh proxy.
@@ -590,8 +619,10 @@ async def recreate_sandbox_for_thread(
         metadata=sandbox_metadata,
     )
     set_sandbox_backend(thread_id, new_sandbox)
+    from agent.browser.manager import stop_browser_for_thread
     from agent.sandboxes.tool_access import provision_tool_url
 
+    await stop_browser_for_thread(thread_id, "sandbox_recreated")
     await provision_tool_url(thread_id, new_sandbox)
     logger.info(
         "Rebound thread %s from sandbox %s to sandbox %s",

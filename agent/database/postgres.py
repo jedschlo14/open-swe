@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from agent.config import ENV
 
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 _ENGINE: AsyncEngine | None = None
 _ENGINE_URI: str | None = None
+_LOCK_ENGINE: AsyncEngine | None = None
+_LOCK_ENGINE_URI: str | None = None
 _MIGRATIONS: ScriptDirectory | None = None
 SCHEMA = "open_swe"
 MIGRATION_DIR = Path(__file__).with_name("migrations")
@@ -148,6 +151,39 @@ async def transaction() -> AsyncIterator[AsyncConnection]:
     async with engine().begin() as conn:
         await conn.execute(text(f"SET LOCAL search_path TO {SCHEMA}, public"))
         yield conn
+
+
+def _lock_engine() -> AsyncEngine:
+    global _LOCK_ENGINE, _LOCK_ENGINE_URI
+    database_uri = uri()
+    if database_uri is None:
+        raise RuntimeError("PostgreSQL is not configured")
+    if _LOCK_ENGINE is None or _LOCK_ENGINE_URI != database_uri:
+        _LOCK_ENGINE = create_async_engine(
+            database_uri,
+            poolclass=NullPool,
+            connect_args={"server_settings": {"application_name": "open-swe-lock"}},
+        )
+        _LOCK_ENGINE_URI = database_uri
+    return _LOCK_ENGINE
+
+
+@asynccontextmanager
+async def advisory_lock(key: str, *, timeout_seconds: int = 600) -> AsyncIterator[None]:
+    """Hold a session advisory lock on ``key`` across slow work that is not in the database.
+
+    The lock lives on its own unpooled connection, so holding it through minutes
+    of sandbox work never starves the pool, and a process that dies releases it.
+    """
+    async with _lock_engine().connect() as conn:
+        await conn.execute(text(f"SET lock_timeout = '{int(timeout_seconds)}s'"))
+        await conn.execute(text("SELECT pg_advisory_lock(hashtextextended(:key, 0))"), {"key": key})
+        try:
+            yield
+        finally:
+            await conn.execute(
+                text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))"), {"key": key}
+            )
 
 
 @asynccontextmanager
