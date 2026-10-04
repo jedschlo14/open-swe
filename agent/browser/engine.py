@@ -20,12 +20,15 @@ import asyncio
 import io
 import json
 import logging
+import math
 import re
 import shlex
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import cache
 from importlib import resources
+from typing import Literal
 
 from langsmith.sandbox import AsyncSandbox, ResourceNotFoundError
 from PIL import Image
@@ -56,6 +59,11 @@ MIN_VIEWPORT = (320, 240)
 MAX_VIEWPORT = (1920, 1200)
 RENDER_SCALE = 1.5
 _SCREENSHOT_QUALITY = 70
+RECORDING_FPS = 10
+MAX_RECORDING_SECONDS = 30
+_SHEET_FRAME_WIDTH = 288
+_SHEET_COLUMNS = 5
+_ENCODE_TIMEOUT_SECONDS = 180
 _LAUNCH_TIMEOUT_SECONDS = 120
 _LIVE_WAIT_SECONDS = 30
 _COMMAND_TIMEOUT_SECONDS = 60
@@ -462,8 +470,10 @@ def _to_viewport_pixels(image: bytes) -> bytes:
 
 
 _MASK_ID = "open-swe-capture-mask"
+_RECORDING_MASK_ID = "open-swe-recording-mask"
 _MASK_ON = (
-    "(() => {{ const s = document.createElement('style'); s.id = '{id}';"
+    "(() => {{ if (document.getElementById('{id}')) return true;"
+    " const s = document.createElement('style'); s.id = '{id}';"
     " s.textContent = 'input[type=password]{{visibility:hidden!important}}"
     " input:-webkit-autofill{{-webkit-text-fill-color:transparent!important;"
     "color:transparent!important}}'; document.documentElement.appendChild(s); return true; }})()"
@@ -496,6 +506,182 @@ async def screenshot(
         return await asyncio.to_thread(_to_viewport_pixels, await sandbox.read(path))
     finally:
         await sandbox.run(f"rm -f {shlex.quote(path)}")
+
+
+RecordingFormat = Literal["mp4", "gif", "webp"]
+
+_VIDEO_FILTER = r"scale=min(1280\,iw):-2"
+_ANIMATION_SCALE = r"fps=8,scale=min(960\,iw):-2:flags=lanczos"
+_ANIMATION_ARGS: dict[RecordingFormat, tuple[str, ...]] = {
+    "mp4": (
+        "-vf",
+        _VIDEO_FILTER,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "30",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-an",
+    ),
+    "gif": (
+        "-vf",
+        _ANIMATION_SCALE + ",split[a][b];[a]palettegen=max_colors=128[p];"
+        "[b][p]paletteuse=dither=bayer:bayer_scale=4",
+    ),
+    "webp": (
+        "-vf",
+        _ANIMATION_SCALE,
+        "-c:v",
+        "libwebp_anim",
+        "-quality",
+        "60",
+        "-loop",
+        "0",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class RecordingSheet:
+    """A tiled one-frame-per-second preview of a recording, and how long it ran."""
+
+    image: bytes
+    seconds: float
+
+
+def _recording_file(session: BrowserSession) -> str:
+    return f"{session_dir(session)}/recording.mp4"
+
+
+def _recording_marker(session: BrowserSession) -> str:
+    return f"{session_dir(session)}/recording.active"
+
+
+async def recording_active(sandbox: AsyncSandbox, session: BrowserSession) -> bool:
+    result = await sandbox.run(f"test -f {shlex.quote(_recording_marker(session))}")
+    return result.exit_code == 0
+
+
+async def keep_recording_mask(sandbox: AsyncSandbox, session: BrowserSession) -> None:
+    """Hide password and autofilled fields on the current page for as long as it is recorded."""
+    try:
+        await run_command(sandbox, session, ["eval", _MASK_ON.format(id=_RECORDING_MASK_ID)])
+    except EngineCommandError:
+        logger.warning(
+            "Could not mask the page being recorded",
+            exc_info=True,
+            extra={"browser_session_id": session.session_id},
+        )
+
+
+async def start_recording(sandbox: AsyncSandbox, session: BrowserSession) -> None:
+    """Begin recording the page, replacing any earlier recording, with sensitive fields hidden."""
+    await sandbox.run(f"rm -f {shlex.quote(_recording_file(session))}")
+    await keep_recording_mask(sandbox, session)
+    await run_command(
+        sandbox,
+        session,
+        ["record", "restart", _recording_file(session), "--fps", str(RECORDING_FPS)],
+    )
+    await sandbox.run(f"date +%s >{shlex.quote(_recording_marker(session))}")
+
+
+async def _end_recording(sandbox: AsyncSandbox, session: BrowserSession) -> None:
+    await sandbox.run(f"rm -f {shlex.quote(_recording_marker(session))}")
+    try:
+        await run_command(sandbox, session, ["eval", _MASK_OFF.format(id=_RECORDING_MASK_ID)])
+    except EngineCommandError:
+        logger.warning(
+            "Could not remove the recording mask",
+            exc_info=True,
+            extra={"browser_session_id": session.session_id},
+        )
+
+
+async def discard_recording(sandbox: AsyncSandbox, session: BrowserSession) -> bool:
+    """Stop any recording and delete it; returns whether one was running."""
+    if not await recording_active(sandbox, session):
+        return False
+    try:
+        await run_command(sandbox, session, ["record", "stop"])
+    except EngineCommandError:
+        logger.warning(
+            "Stopping the recording failed; deleting it anyway",
+            exc_info=True,
+            extra={"browser_session_id": session.session_id},
+        )
+    finally:
+        await sandbox.run(f"rm -f {shlex.quote(_recording_file(session))}")
+        await _end_recording(sandbox, session)
+    return True
+
+
+async def stop_recording(sandbox: AsyncSandbox, session: BrowserSession) -> RecordingSheet | None:
+    """Finish the recording and return a preview sheet, or ``None`` when none was running."""
+    if not await recording_active(sandbox, session):
+        return None
+    try:
+        await run_command(sandbox, session, ["record", "stop"])
+    except EngineCommandError:
+        await sandbox.run(f"rm -f {shlex.quote(_recording_file(session))}")
+        raise
+    finally:
+        await _end_recording(sandbox, session)
+    return await _contact_sheet(sandbox, session)
+
+
+async def _contact_sheet(sandbox: AsyncSandbox, session: BrowserSession) -> RecordingSheet:
+    video = shlex.quote(_recording_file(session))
+    probe = await sandbox.run(
+        f"ffprobe -v error -show_entries format=duration -of csv=p=0 {video}",
+        timeout=_COMMAND_TIMEOUT_SECONDS,
+    )
+    try:
+        seconds = float(probe.stdout.strip())
+    except ValueError:
+        raise EngineCommandError("the recording is empty or unreadable") from None
+    frames = min(max(math.ceil(seconds), 1), MAX_RECORDING_SECONDS)
+    columns = min(_SHEET_COLUMNS, frames)
+    rows = math.ceil(frames / columns)
+    sheet = f"{session_dir(session)}/sheet.jpg"
+    made = await sandbox.run(
+        f"ffmpeg -v error -y -i {video} -vf"
+        f" fps=1,scale={_SHEET_FRAME_WIDTH}:-2,tile={columns}x{rows}"
+        f" -frames:v 1 -update 1 -q:v 5 {shlex.quote(sheet)}",
+        timeout=_ENCODE_TIMEOUT_SECONDS,
+    )
+    if made.exit_code != 0:
+        raise EngineCommandError(made.stderr.strip() or "could not preview the recording")
+    try:
+        return RecordingSheet(image=await sandbox.read(sheet), seconds=seconds)
+    finally:
+        await sandbox.run(f"rm -f {shlex.quote(sheet)}")
+
+
+async def export_recording(
+    sandbox: AsyncSandbox, session: BrowserSession, recording_format: RecordingFormat
+) -> bytes:
+    """The stopped recording encoded as ``recording_format``, at most 30 seconds long."""
+    source = _recording_file(session)
+    output = f"{session_dir(session)}/export.{recording_format}"
+    quoted = shlex.quote(output)
+    args = shlex.join(_ANIMATION_ARGS[recording_format])
+    try:
+        made = await sandbox.run(
+            f"test -f {shlex.quote(source)} && ffmpeg -v error -y -i {shlex.quote(source)}"
+            f" -t {MAX_RECORDING_SECONDS} {args} {quoted}",
+            timeout=_ENCODE_TIMEOUT_SECONDS,
+        )
+        if made.exit_code != 0:
+            raise EngineCommandError(made.stderr.strip() or "there is no finished recording")
+        return await sandbox.read(output)
+    finally:
+        await sandbox.run(f"rm -f {quoted}")
 
 
 async def close(sandbox: AsyncSandbox, session: BrowserSession) -> None:

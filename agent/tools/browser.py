@@ -7,18 +7,30 @@ model inside untrusted-content markers.
 
 import base64
 import json
+import logging
 
+import httpx2
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, JsonValue
 
 from agent.audit_logs.tools import audit_tool
-from agent.browser import broker, evidence, manager
+from agent.browser import attachments, broker, evidence, manager
 from agent.browser.broker import BrowserOutcome
 from agent.browser.evidence import Label
-from agent.browser.ops import ActOp, NavigateOp, ScreenshotOp, SnapshotOp
+from agent.browser.ops import (
+    ActOp,
+    FlowStep,
+    NavigateOp,
+    RecordStartOp,
+    RecordStopOp,
+    ScreenshotOp,
+    SnapshotOp,
+)
 from agent.credential_scope import private_credential_login
 from agent.prompts import prompt
 from agent.run_config import RunConfig
+
+logger = logging.getLogger(__name__)
 
 type ContentBlock = dict[str, str]
 
@@ -28,6 +40,10 @@ BROWSER_TOOL_NAMES = (
     "browser_act",
     "browser_screenshot",
     "browser_publish_screenshot",
+    "browser_record",
+    "browser_record_start",
+    "browser_record_stop",
+    "browser_publish_recording",
     "browser_use_saved_sign_in",
     "browser_stop",
 )
@@ -70,6 +86,23 @@ class _NoArgs(BaseModel):
 class _PublishArgs(BaseModel):
     label: Label = Field(description="`before` or `after` for a comparison pair, else `other`.")
     caption: str = Field(max_length=120, description="Short alt text describing what it shows.")
+
+
+class _RecordArgs(BaseModel):
+    steps: list[FlowStep] = Field(
+        min_length=1,
+        max_length=12,
+        description="The page actions to record, run back to back in this order.",
+    )
+    pause_ms: int = Field(
+        default=600, ge=0, le=2_000, description="Pause after each step so the result is visible."
+    )
+
+
+class _PublishRecordingArgs(BaseModel):
+    caption: str = Field(
+        max_length=120, description="Short alt text, used when it is published as an animation."
+    )
 
 
 def _context() -> tuple[str, str | None]:
@@ -160,6 +193,141 @@ async def browser_publish_screenshot(label: Label, caption: str) -> str:
     return json.dumps({"status": "ok", "markdown": published.markdown})
 
 
+async def browser_record_start() -> str:
+    thread_id, workspace = _context()
+    return _report(await broker.execute(thread_id, RecordStartOp(), workspace_slug=workspace))
+
+
+def _sheet_blocks(outcome: BrowserOutcome) -> list[ContentBlock] | str:
+    if outcome.image_base64 is None:
+        return _report(outcome)
+    return [
+        {"type": "text", "text": outcome.message or "Recording preview."},
+        {
+            "type": "image",
+            "base64": outcome.image_base64,
+            "mime_type": outcome.image_mime_type or "image/jpeg",
+        },
+    ]
+
+
+async def browser_record_stop() -> list[ContentBlock] | str:
+    thread_id, workspace = _context()
+    return _sheet_blocks(await broker.execute(thread_id, RecordStopOp(), workspace_slug=workspace))
+
+
+async def browser_record(steps: list[FlowStep], pause_ms: int = 600) -> list[ContentBlock] | str:
+    thread_id, workspace = _context()
+    return _sheet_blocks(
+        await broker.record_flow(thread_id, steps, workspace_slug=workspace, pause_ms=pause_ms)
+    )
+
+
+async def _personal_token() -> str | None:
+    """The private thread owner's GitHub token, the only one a recording may be uploaded with."""
+    try:
+        login = await private_credential_login()
+    except RuntimeError:
+        logger.info("No personal GitHub token for the recording upload", exc_info=True)
+        return None
+    if login is None:
+        return None
+    from agent.dashboard.profiles import get_valid_access_token
+
+    return await get_valid_access_token(login)
+
+
+async def _upload_video(thread_id: str, repo_full_name: str) -> tuple[str | None, str | None]:
+    """A user-attachments URL for the recording and, when there is none, why not."""
+    token = await _personal_token()
+    if token is None:
+        return None, "no personal GitHub token is available in this thread"
+    outcome, video = await broker.export_recording(thread_id, "mp4")
+    if video is None:
+        return None, outcome.message or "the recording could not be encoded"
+    from agent.github.http import github_client
+
+    try:
+        async with github_client(timeout=120.0) as client:
+            url = await attachments.upload_video(
+                client, token, repo_full_name, name="recording.mp4", data=video.data
+            )
+    except (attachments.AttachmentError, httpx2.HTTPError) as exc:
+        logger.info(
+            "Recording upload as a GitHub attachment failed; falling back to an animation",
+            exc_info=True,
+            extra={"repo_full_name": repo_full_name},
+        )
+        return None, str(exc)
+    return url, None
+
+
+async def _publish_animation(
+    thread_id: str, repo_full_name: str, caption: str
+) -> evidence.PublishedEvidence | str:
+    from agent.github.http import github_client
+    from agent.github.sandbox_access import repository_token
+
+    access = await repository_token([repo_full_name], permissions={"contents": "write"})
+    if not access.token:
+        return "The GitHub App has no write access to this repository."
+    for recording_format in ("gif", "webp"):
+        outcome, animation = await broker.export_recording(thread_id, recording_format)
+        if animation is None:
+            return outcome.message or "The recording could not be encoded."
+        if len(animation.data) > evidence.MAX_IMAGE_BYTES:
+            continue
+        async with github_client(token=access.token) as client:
+            return await evidence.publish_image(
+                client,
+                repo_full_name,
+                thread_id=thread_id,
+                label="recording",
+                caption=caption,
+                data=animation.data,
+                extension=recording_format,
+            )
+    return "The recording is too large to publish as an animation. Record something shorter."
+
+
+async def browser_publish_recording(caption: str) -> str:
+    thread_id, _ = _context()
+    cfg = RunConfig.from_runtime()
+    if not cfg.repo_full_name:
+        return json.dumps({"status": "error", "message": "This thread has no repository."})
+    url, reason = await _upload_video(thread_id, cfg.repo_full_name)
+    if url is not None:
+        return json.dumps(
+            {
+                "status": "ok",
+                "kind": "video",
+                "markdown": url,
+                "note": "Put this URL alone on its own line in the PR description; GitHub "
+                "then shows a video player.",
+            }
+        )
+    try:
+        published = await _publish_animation(thread_id, cfg.repo_full_name, caption)
+    except (evidence.EvidenceError, RuntimeError) as exc:
+        published = str(exc)
+    if isinstance(published, str):
+        return json.dumps(
+            {
+                "status": "error",
+                "message": f"{published} Leave the recording out of the PR and say why.",
+            }
+        )
+    return json.dumps(
+        {
+            "status": "ok",
+            "kind": "animation",
+            "markdown": published.markdown,
+            "note": f"Published as an animated image because a video upload was not possible "
+            f"({reason}). It plays on a loop, without controls.",
+        }
+    )
+
+
 @audit_tool()
 async def browser_use_saved_sign_in(origin: str) -> dict[str, JsonValue]:
     thread_id, workspace = _context()
@@ -217,6 +385,30 @@ def browser_tools() -> list[BaseTool]:
             name="browser_publish_screenshot",
             description=prompt("tools/browser_publish_screenshot"),
             args_schema=_PublishArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=browser_record,
+            name="browser_record",
+            description=prompt("tools/browser_record"),
+            args_schema=_RecordArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=browser_record_start,
+            name="browser_record_start",
+            description=prompt("tools/browser_record_start"),
+            args_schema=_NoArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=browser_record_stop,
+            name="browser_record_stop",
+            description=prompt("tools/browser_record_stop"),
+            args_schema=_NoArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=browser_publish_recording,
+            name="browser_publish_recording",
+            description=prompt("tools/browser_publish_recording"),
+            args_schema=_PublishRecordingArgs,
         ),
         StructuredTool.from_function(
             coroutine=browser_use_saved_sign_in,

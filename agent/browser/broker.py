@@ -5,9 +5,12 @@ current controller acts), the egress allowlist, and the confirmation gate for
 sensitive actions, whose approvals only a thread writer can grant.
 """
 
+import asyncio
 import base64
 import logging
-from collections.abc import Awaitable, Callable
+import weakref
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from langsmith.sandbox import AsyncSandbox
@@ -15,7 +18,18 @@ from pydantic import BaseModel, JsonValue
 
 from agent.browser import engine, manager, policy, sign_ins, store
 from agent.browser.models import BrowserSession, HandbackNotice, PageRef
-from agent.browser.ops import BrowserOp, ClickOp, NavigateOp, ScreenshotOp, SnapshotOp, commands
+from agent.browser.ops import (
+    BrowserOp,
+    ClickOp,
+    FlowStep,
+    NavigateOp,
+    RecordStartOp,
+    RecordStopOp,
+    ScreenshotOp,
+    SnapshotOp,
+    WaitOp,
+    commands,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +56,23 @@ class BrowserOutcome(BaseModel):
     image_base64: str | None = None
     image_mime_type: str | None = None
     handback: HandbackNotice | None = None
+
+
+_THREAD_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+RECORDING_LEAD_IN_SECONDS = 1.0
+RECORDING_TAIL_SECONDS = 1.5
+MAX_FLOW_WAIT_MS = 5_000
+
+
+@asynccontextmanager
+async def _one_at_a_time(thread_id: str) -> AsyncIterator[None]:
+    """Queue a thread's browser calls in arrival order, so parallel tool calls never interleave."""
+    lock = _THREAD_LOCKS.get(thread_id)
+    if lock is None:
+        lock = _THREAD_LOCKS[thread_id] = asyncio.Lock()
+    async with lock:
+        yield
 
 
 def _text(data: dict[str, JsonValue], key: str) -> str | None:
@@ -99,13 +130,63 @@ async def execute(
     confirmation_id: str | None = None,
 ) -> BrowserOutcome:
     """Run ``op`` on the thread's browser as the agent."""
-    found = await _session_for(thread_id, op, workspace_slug)
-    if isinstance(found, BrowserOutcome):
-        return found
-    return await _as_agent(
-        thread_id,
-        found,
-        lambda sandbox, session: _execute(sandbox, session, op, confirmation_id),
+    async with _one_at_a_time(thread_id):
+        found = await _session_for(thread_id, op, workspace_slug)
+        if isinstance(found, BrowserOutcome):
+            return found
+        return await _as_agent(
+            thread_id,
+            found,
+            lambda sandbox, session: _execute(sandbox, session, op, confirmation_id),
+        )
+
+
+async def record_flow(
+    thread_id: str,
+    steps: Sequence[FlowStep],
+    *,
+    workspace_slug: str | None,
+    pause_ms: int,
+) -> BrowserOutcome:
+    """Record ``steps`` run back to back as one short clip, discarding it if any step fails."""
+    if any(isinstance(step, WaitOp) and step.milliseconds > MAX_FLOW_WAIT_MS for step in steps):
+        return BrowserOutcome(
+            status="error",
+            message=f"A wait in a recording is at most {MAX_FLOW_WAIT_MS} ms; keep clips short.",
+        )
+    async with _one_at_a_time(thread_id):
+        found = await manager.current(thread_id)
+        if found is None or not found.active:
+            return BrowserOutcome(
+                status="no_session", message="No browser is open. Navigate to a page first."
+            )
+
+        async def run(sandbox: AsyncSandbox, session: BrowserSession) -> BrowserOutcome:
+            await engine.start_recording(sandbox, session)
+            try:
+                await asyncio.sleep(RECORDING_LEAD_IN_SECONDS)
+                for number, step in enumerate(steps, start=1):
+                    outcome = await _execute(sandbox, session, step, None)
+                    if outcome.status != "ok":
+                        await engine.discard_recording(sandbox, session)
+                        return _failed_step(number, step, outcome)
+                    await asyncio.sleep(pause_ms / 1000)
+                await asyncio.sleep(RECORDING_TAIL_SECONDS)
+            except Exception:
+                await engine.discard_recording(sandbox, session)
+                raise
+            return await _stopped_recording(sandbox, session)
+
+        return await _as_agent(thread_id, found, run)
+
+
+def _failed_step(number: int, step: FlowStep, outcome: BrowserOutcome) -> BrowserOutcome:
+    reason = outcome.message or outcome.status
+    if outcome.status == "confirmation_required":
+        reason = f"{reason} needs a person's approval; do it with browser_act outside a recording"
+    return BrowserOutcome(
+        status="refused" if outcome.status == "confirmation_required" else outcome.status,
+        message=f"Step {number} ({step.action}) failed: {reason}. The recording was discarded.",
     )
 
 
@@ -170,7 +251,7 @@ async def _still_held(session: BrowserSession) -> bool:
 async def _decide(sandbox: AsyncSandbox, session: BrowserSession, op: BrowserOp) -> policy.Decision:
     if isinstance(op, NavigateOp):
         return policy.navigation(op, session.approved_endpoints)
-    if isinstance(op, SnapshotOp | ScreenshotOp):
+    if isinstance(op, SnapshotOp | ScreenshotOp | RecordStartOp | RecordStopOp):
         return policy.Allow()
     label = None
     if isinstance(op, ClickOp) and op.x is not None and op.y is not None:
@@ -229,11 +310,27 @@ async def _execute(
             image_base64=base64.b64encode(image).decode(),
             image_mime_type="image/png" if op.format == "png" else "image/jpeg",
         )
+    if isinstance(op, RecordStartOp):
+        await engine.start_recording(sandbox, session)
+        return BrowserOutcome(
+            status="ok",
+            message=(
+                f"Recording. It keeps the first {engine.MAX_RECORDING_SECONDS} seconds and "
+                "is discarded if a person takes control. Stop it with browser_record_stop."
+            ),
+        )
+    if isinstance(op, RecordStopOp):
+        return await _stopped_recording(sandbox, session)
+    recording = await engine.recording_active(sandbox, session)
+    if recording:
+        await engine.keep_recording_mask(sandbox, session)
     data: dict[str, JsonValue] = {}
     for index, args in enumerate(commands(op)):
         if index and not await _still_held(session):
             raise _Superseded
         data = await engine.run_command(sandbox, session, args)
+    if recording:
+        await engine.keep_recording_mask(sandbox, session)
     if isinstance(op, SnapshotOp):
         await store.record_refs(session.session_id, _refs(data))
         return BrowserOutcome(
@@ -242,6 +339,53 @@ async def _execute(
     if isinstance(op, NavigateOp):
         return BrowserOutcome(status="ok", url=_text(data, "url"), title=_text(data, "title"))
     return BrowserOutcome(status="ok")
+
+
+async def _stopped_recording(sandbox: AsyncSandbox, session: BrowserSession) -> BrowserOutcome:
+    sheet = await engine.stop_recording(sandbox, session)
+    if sheet is None:
+        return BrowserOutcome(
+            status="error",
+            message=(
+                "No recording is in progress. One is discarded when a person takes "
+                "control of the browser."
+            ),
+        )
+    return BrowserOutcome(
+        status="ok",
+        message=(
+            f"Recorded {sheet.seconds:.0f} seconds; the image is one frame per second. "
+            "Check it, then publish with browser_publish_recording."
+        ),
+        image_base64=base64.b64encode(sheet.image).decode(),
+        image_mime_type="image/jpeg",
+    )
+
+
+class RecordingExport(BaseModel):
+    """A finished recording encoded for publishing."""
+
+    data: bytes
+    recording_format: engine.RecordingFormat
+
+
+async def export_recording(
+    thread_id: str, recording_format: engine.RecordingFormat
+) -> tuple[BrowserOutcome, RecordingExport | None]:
+    """Encode the thread's finished recording as ``recording_format``."""
+    exported: list[RecordingExport] = []
+
+    async def run(sandbox: AsyncSandbox, session: BrowserSession) -> BrowserOutcome:
+        data = await engine.export_recording(sandbox, session, recording_format)
+        exported.append(RecordingExport(data=data, recording_format=recording_format))
+        return BrowserOutcome(status="ok")
+
+    async with _one_at_a_time(thread_id):
+        found = await manager.current(thread_id)
+        if found is None or not found.active:
+            return BrowserOutcome(status="no_session", message="No browser is open."), None
+        outcome = await _as_agent(thread_id, found, run)
+    return outcome, exported[0] if exported and outcome.status == "ok" else None
 
 
 async def restore_sign_in(
@@ -264,29 +408,32 @@ async def restore_sign_in(
     record, state = saved
     if record.status == "expired":
         return _EXPIRED
-    try:
-        found = await manager.ensure_session(
-            thread_id, started_by="agent", workspace_slug=workspace_slug
-        )
-    except manager.BrowserUnsupportedError as exc:
-        return BrowserOutcome(status="unavailable", message=str(exc))
-    if endpoint.key not in found.approved_endpoints:
-        return BrowserOutcome(
-            status="refused", message=f"{endpoint.host} is no longer an approved endpoint."
-        )
+    async with _one_at_a_time(thread_id):
+        try:
+            found = await manager.ensure_session(
+                thread_id, started_by="agent", workspace_slug=workspace_slug
+            )
+        except manager.BrowserUnsupportedError as exc:
+            return BrowserOutcome(status="unavailable", message=str(exc))
+        if endpoint.key not in found.approved_endpoints:
+            return BrowserOutcome(
+                status="refused", message=f"{endpoint.host} is no longer an approved endpoint."
+            )
 
-    async def run(sandbox: AsyncSandbox, session: BrowserSession) -> BrowserOutcome:
-        if not await engine.apply_sign_in(sandbox, session, target, state):
-            await sign_ins.mark_expired(record.sign_in_id)
-            return _EXPIRED
-        await sign_ins.mark_used(record.sign_in_id)
-        logger.info(
-            "Browser sign-in restored",
-            extra={"browser_session_id": session.session_id, "sign_in_id": record.sign_in_id},
-        )
-        return BrowserOutcome(status="ok", message=f"Signed in to {target} with a saved sign-in.")
+        async def run(sandbox: AsyncSandbox, session: BrowserSession) -> BrowserOutcome:
+            if not await engine.apply_sign_in(sandbox, session, target, state):
+                await sign_ins.mark_expired(record.sign_in_id)
+                return _EXPIRED
+            await sign_ins.mark_used(record.sign_in_id)
+            logger.info(
+                "Browser sign-in restored",
+                extra={"browser_session_id": session.session_id, "sign_in_id": record.sign_in_id},
+            )
+            return BrowserOutcome(
+                status="ok", message=f"Signed in to {target} with a saved sign-in."
+            )
 
-    return await _as_agent(thread_id, found, run)
+        return await _as_agent(thread_id, found, run)
 
 
 _EXPIRED = BrowserOutcome(

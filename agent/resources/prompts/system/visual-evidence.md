@@ -12,3 +12,7 @@ Every PR that changes something a reviewer could see in a browser (a UI bug fix,
 If you already changed the code, commit it, take the `before` capture from the base branch's version of the changed files (`git checkout origin/<base> -- <files>`), then restore yours (`git checkout HEAD -- <files>`).
 
 Skip this only when the change has no visible effect (backend, tests, docs, config, refactors), the page still cannot be rendered after you tried in the browser, or it would show secrets, other people's data, or anything private. When you skip a visible change or the tool fails, add a line starting `Before/after screenshots omitted:` to the PR body that says what you tried and why it failed.
+
+### Recordings
+
+Add a short recording only when motion is the evidence (a transition, an animation, a multi-step flow) and a still pair would not show it. It supplements the before/after screenshots and never replaces them. Rehearse the flow once, then capture it with a single `browser_record` call (5 to 10 seconds, only the steps that show the point), check the returned frames, then `browser_publish_recording`. Make one clip per before/after, not several attempts. Never batch browser calls in parallel. Put a returned video URL alone on its own line in the PR body; embed an animation's Markdown as it is.
