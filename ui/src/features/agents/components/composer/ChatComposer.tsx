@@ -99,7 +99,16 @@ export interface RestoredDraft {
   images: Array<ImageChunk>
 }
 
+interface ComposerDraft {
+  value: string
+  images: Array<ImageChunk>
+}
+
+const composerDrafts = new Map<string, ComposerDraft>()
+
 export interface ChatComposerProps {
+  /** Keeps unsent text and attachments per key for the page session, so they survive switching away and back. */
+  draftKey?: string
   placeholder?: string
   autoFocus?: boolean
   compact?: boolean
@@ -252,6 +261,7 @@ export function buildCommandItems(
 
 /** Prompt editor with autocomplete, model selection, attachments, and send/stop controls. */
 export const ChatComposer = memo(function ChatComposer({
+  draftKey,
   placeholder = "Ask Open SWE to build, fix bugs, explore",
   autoFocus = false,
   compact = false,
@@ -293,9 +303,14 @@ export const ChatComposer = memo(function ChatComposer({
   contextUsage,
   routed,
 }: ChatComposerProps) {
-  const [value, setValue] = useState("")
-  const [cursor, setCursor] = useState(0)
-  const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>([])
+  const [initialDraft] = useState(() =>
+    draftKey ? composerDrafts.get(draftKey) : undefined
+  )
+  const [value, setValue] = useState(initialDraft?.value ?? "")
+  const [cursor, setCursor] = useState(initialDraft?.value.length ?? 0)
+  const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>(
+    initialDraft?.images ?? []
+  )
   const [dragKind, setDragKind] = useState<"files" | "path" | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [activeItemId, setActiveItemId] = useState<string | null>(null)
@@ -408,6 +423,15 @@ export const ChatComposer = memo(function ChatComposer({
     setDismissedTriggerKey(null)
     setActiveItemId(null)
   }, [])
+
+  useEffect(() => {
+    if (!draftKey) return
+    if (value.length === 0 && pendingImages.length === 0) {
+      composerDrafts.delete(draftKey)
+    } else {
+      composerDrafts.set(draftKey, { value, images: pendingImages })
+    }
+  }, [draftKey, pendingImages, value])
 
   const restoredKeyRef = useRef<number | null>(null)
   useEffect(() => {
