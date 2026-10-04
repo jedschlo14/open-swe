@@ -43,3 +43,7 @@ The existing PR image proxy displays published raster images but cannot upload m
 ## How a sign-in is saved and reused
 
 While a person controls the browser on an approved external origin in a private thread they own, the Browser panel offers "Save sign-in". The server reads that page's cookies for the origin's host and its localStorage, encrypts them with `agent/encryption.py`, and stores one row per person and origin in `browser_saved_sign_in`, expiring after 30 days; saving again replaces it. `browser_use_saved_sign_in` restores it for the thread's owner only. The allowlist forbids `agent-browser` state loading, so cookies are set one at a time, then the origin is opened and localStorage written. If the page still shows a password field, the sign-in is marked expired and the agent asks the person to sign in again. Each restore is audited, and people list and revoke their sign-ins under Settings.
+
+## How to smoke-test saved sign-ins without an external site
+
+`scripts/smoke_login_app.py` is a stdlib login app (`demo` / `demo`) that sets a session cookie and a localStorage entry. Run `python scripts/smoke_login_app.py` in the sandbox; it listens on `127.0.0.2:8765`, which the browser treats as an external origin, so no outside service is involved. Add `127.0.0.2:8765` to the approved dev endpoints, open `http://127.0.0.2:8765` in the browser, take control, sign in, choose "Save sign-in", and hand back. In a new thread, `browser_use_saved_sign_in` for that origin should land on "Signed in as demo".
