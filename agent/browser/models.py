@@ -103,6 +103,11 @@ class BrowserSession(BaseModel):
         )
 
     @property
+    def live_view(self) -> bool:
+        """Whether the browser runs headed on a virtual display the dashboard can stream."""
+        return self.stream_port is not None
+
+    @property
     def network_namespace(self) -> str:
         """The network namespace the browser runs in; its only way out is the egress proxy."""
         return f"osw-{self.session_id}"
@@ -127,6 +132,7 @@ class BrowserSessionView(BaseModel):
     handoff: Handoff | None = None
     viewer_controls: bool = False
     pending_confirmation: PendingConfirmation | None = None
+    live_view: bool = False
 
     @classmethod
     def of(
@@ -155,4 +161,5 @@ class BrowserSessionView(BaseModel):
             handoff=session.handoff if session.active else None,
             viewer_controls=session.user_controls(viewer),
             pending_confirmation=session.pending_confirmation if session.active else None,
+            live_view=session.live_view,
         )

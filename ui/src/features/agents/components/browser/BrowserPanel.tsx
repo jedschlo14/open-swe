@@ -1,19 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import type {
-  KeyboardEvent as ReactKeyboardEvent,
-  MouseEvent as ReactMouseEvent,
-  ReactNode,
-} from "react"
+import type { ReactNode } from "react"
 import {
   Bot,
   Globe2,
   Hand,
-  MousePointer2,
   Play,
   ShieldAlert,
   Square,
   Timer,
 } from "lucide-react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -26,8 +22,16 @@ import type {
   BrowserSessionView,
   BrowserStopReason,
 } from "@/features/agents/lib/api"
+import {
+  BrowserStage,
+  type StageOwner,
+} from "@/features/agents/components/browser/BrowserStage"
+import { BrowserToolbar } from "@/features/agents/components/browser/BrowserToolbar"
+import {
+  viewportFor,
+  type ViewportSize,
+} from "@/features/agents/components/browser/browserViewport"
 import { useBrowserLive } from "@/features/agents/components/browser/useBrowserLive"
-import { cn } from "@/lib/utils"
 
 const STATUS_POLL_MS = 5_000
 const TRANSITION_POLL_MS = 750
@@ -48,31 +52,8 @@ const STOP_COPY: Record<BrowserStopReason, string> = {
   sandbox_recreated: "The browser stopped when the sandbox was recreated.",
 }
 
-const MOUSE_BUTTONS = ["left", "middle", "right"] as const
-
-function modifierBits(event: {
-  altKey: boolean
-  ctrlKey: boolean
-  metaKey: boolean
-  shiftKey: boolean
-}): number {
-  return (
-    (event.altKey ? 1 : 0) |
-    (event.ctrlKey ? 2 : 0) |
-    (event.metaKey ? 4 : 0) |
-    (event.shiftKey ? 8 : 0)
-  )
-}
-
 export function browserQueryKey(threadId: string) {
   return ["browser", threadId] as const
-}
-
-function controllerLabel(view: BrowserSessionView): string {
-  if (view.controller !== "user") return "Agent in control"
-  if (view.viewerControls)
-    return "You're in control. Click the page to interact."
-  return `${view.controllerLogin ?? "A person"} is in control`
 }
 
 function formatExpiry(expiresAt: string): string {
@@ -80,6 +61,30 @@ function formatExpiry(expiresAt: string): string {
     hour: "numeric",
     minute: "2-digit",
   })
+}
+
+/** The content size of the element a callback ref is attached to, kept current as it resizes. */
+function useElementSize() {
+  const [size, setSize] = useState<ViewportSize | null>(null)
+  const observer = useRef<ResizeObserver | null>(null)
+  const ref = useCallback((node: HTMLDivElement | null) => {
+    observer.current?.disconnect()
+    observer.current = null
+    if (!node) return
+    const next = new ResizeObserver(([entry]) => {
+      if (!entry) return
+      const width = Math.floor(entry.contentRect.width)
+      const height = Math.floor(entry.contentRect.height)
+      setSize((current) =>
+        current?.width === width && current.height === height
+          ? current
+          : { width, height }
+      )
+    })
+    next.observe(node)
+    observer.current = next
+  }, [])
+  return [size, ref] as const
 }
 
 function Centered(props: { children: ReactNode }) {
@@ -155,15 +160,23 @@ export function BrowserPanel(props: { threadId: string }) {
       return changing ? TRANSITION_POLL_MS : STATUS_POLL_MS
     },
   })
+  const [stageSize, stageRef] = useElementSize()
+  const viewport = useMemo(
+    () => (stageSize ? viewportFor(stageSize) : null),
+    [stageSize]
+  )
   const {
     attachCanvas,
-    pointAt,
-    sendInput,
+    send,
+    cursor,
+    page,
+    geometry,
     status: liveStatus,
     role,
   } = useBrowserLive(
     threadId,
-    status.data?.state === "ready" ? status.data.sessionId : null
+    status.data?.state === "ready" ? status.data.sessionId : null,
+    viewport
   )
   const canControl = role !== "view"
 
@@ -214,17 +227,6 @@ export function BrowserPanel(props: { threadId: string }) {
     )
   }
 
-  if (view.state === "ready" && view.handoff !== "none" && view.handoff) {
-    return (
-      <Centered>
-        <Spinner />
-        {view.handoff === "takeover"
-          ? "Waiting for the agent's current action to finish…"
-          : "Handing control back to the agent…"}
-      </Centered>
-    )
-  }
-
   if (view.state === "starting" || view.state === "stopping") {
     return (
       <Centered>
@@ -264,100 +266,82 @@ export function BrowserPanel(props: { threadId: string }) {
 
   const pending = view.pendingConfirmation
   const driving = view.viewerControls && liveStatus === "live"
-  const sendMouse = (
-    event: ReactMouseEvent<HTMLCanvasElement>,
-    eventType: "mousePressed" | "mouseReleased" | "mouseMoved"
-  ) => {
-    if (!driving) return
-    const point = pointAt(event.clientX, event.clientY)
-    if (!point) return
-    sendInput({
-      type: "input_mouse",
-      eventType,
-      ...point,
-      button:
-        eventType === "mouseMoved"
-          ? "none"
-          : (MOUSE_BUTTONS[event.button] ?? "left"),
-      clickCount: eventType === "mouseMoved" ? 0 : Math.min(event.detail, 3),
-      modifiers: modifierBits(event),
-    })
-  }
-  const sendKey = (
-    event: ReactKeyboardEvent<HTMLCanvasElement>,
-    eventType: "keyDown" | "keyUp"
-  ) => {
-    if (!driving) return
-    event.preventDefault()
-    sendInput({
-      type: "input_keyboard",
-      eventType,
-      key: event.key,
-      code: event.code,
-      ...(eventType === "keyDown" && event.key.length === 1
-        ? { text: event.key }
-        : {}),
-      modifiers: modifierBits(event),
-    })
-  }
+  const canTakeOver = canControl && view.controller === "agent"
+  const handingOver = view.handoff != null && view.handoff !== "none"
+  const takingOver = handingOver && view.handoff === "takeover"
+  const owner: StageOwner = view.viewerControls
+    ? { kind: "you" }
+    : view.controller === "user"
+      ? { kind: "person", login: view.controllerLogin }
+      : { kind: "agent", canTakeOver }
+  const stopButton = canControl ? (
+    <Button
+      aria-label="Stop the browser"
+      className="cursor-pointer"
+      size="icon-sm"
+      variant="ghost"
+      title="Stop the browser"
+      disabled={action.isPending}
+      onClick={() => action.mutate("stop")}
+    >
+      <Square />
+    </Button>
+  ) : null
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
-        <span className="flex min-w-0 items-center gap-1.5 text-foreground">
-          {view.controller === "user" ? (
-            <MousePointer2 className="size-3.5 shrink-0" />
-          ) : (
-            <Bot className="size-3.5 shrink-0" />
-          )}
-          <span className="truncate">{controllerLabel(view)}</span>
-        </span>
-        <span className="flex-1" />
-        {canControl && view.handoff === "none" ? (
-          view.controller === "agent" ? (
-            <Button
-              className="cursor-pointer"
-              size="sm"
-              variant="outline"
-              disabled={action.isPending}
-              onClick={() => action.mutate("takeover")}
-            >
-              {action.isPending && action.variables === "takeover" ? (
-                <Spinner />
-              ) : (
-                <Hand />
-              )}
-              Take control
-            </Button>
-          ) : (
-            <Button
-              className="cursor-pointer"
-              size="sm"
-              variant="outline"
-              disabled={action.isPending}
-              onClick={() => action.mutate("handback")}
-            >
-              {action.isPending && action.variables === "handback" ? (
-                <Spinner />
-              ) : (
-                <Bot />
-              )}
-              Hand back
-            </Button>
-          )
-        ) : null}
-        {canControl ? (
+      {view.liveView ? (
+        <BrowserToolbar
+          page={page}
+          enabled={driving}
+          send={send}
+          trailing={stopButton}
+        />
+      ) : (
+        <div className="flex items-center justify-end border-b border-border px-2 py-1">
+          {stopButton}
+        </div>
+      )}
+      {driving ? (
+        <div className="flex items-center gap-2 border-b border-border bg-primary/10 px-3 py-1.5 text-xs">
+          <Hand className="size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">
+            <span className="font-medium">You're in control.</span> The agent is
+            paused and won't act until you hand back.
+          </span>
           <Button
             className="cursor-pointer"
             size="sm"
-            variant="ghost"
-            disabled={action.isPending}
-            onClick={() => action.mutate("stop")}
+            variant="outline"
+            disabled={action.isPending || handingOver}
+            onClick={() => action.mutate("handback")}
           >
-            <Square />
-            Stop
+            {action.isPending && action.variables === "handback" ? (
+              <Spinner />
+            ) : (
+              <Bot />
+            )}
+            Hand back to agent
           </Button>
-        ) : null}
-      </div>
+        </div>
+      ) : view.liveView && canControl && view.controller === "user" ? (
+        <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs">
+          <span className="min-w-0 flex-1 text-muted-foreground">
+            {view.controllerLogin ?? "A person"} is in control. The agent is
+            paused.
+          </span>
+          <Button
+            className="cursor-pointer"
+            size="sm"
+            variant="outline"
+            disabled={action.isPending || handingOver}
+            onClick={() => action.mutate("handback")}
+          >
+            <Bot />
+            Hand back to agent
+          </Button>
+        </div>
+      ) : null}
       {view.expiryWarning && view.expiresAt ? (
         <div className="mx-3 mt-3 flex items-center gap-2 rounded-lg border border-border bg-card p-2.5 text-xs">
           <Timer className="size-3.5 shrink-0" />
@@ -387,60 +371,37 @@ export function BrowserPanel(props: { threadId: string }) {
           }
         />
       ) : null}
-      <div className="relative flex min-h-0 flex-1 items-center justify-center bg-muted/30 p-3">
-        <canvas
-          ref={attachCanvas}
-          aria-label={
-            driving
-              ? "The thread's browser. You are in control."
-              : "Live view of the thread's browser"
-          }
-          tabIndex={driving ? 0 : -1}
-          className={cn(
-            "max-h-full max-w-full rounded-md border border-border bg-background object-contain shadow-sm outline-none",
-            liveStatus !== "live" && "opacity-40",
-            driving &&
-              "cursor-default ring-2 ring-primary/60 focus:ring-primary"
-          )}
-          onMouseDown={(event) => {
-            if (!driving) return
-            event.currentTarget.focus()
-            sendMouse(event, "mousePressed")
-          }}
-          onMouseUp={(event) => sendMouse(event, "mouseReleased")}
-          onMouseMove={(event) => sendMouse(event, "mouseMoved")}
-          onWheel={(event) => {
-            if (!driving) return
-            const point = pointAt(event.clientX, event.clientY)
-            if (!point) return
-            sendInput({
-              type: "input_mouse",
-              eventType: "mouseWheel",
-              ...point,
-              button: "none",
-              clickCount: 0,
-              deltaX: event.deltaX,
-              deltaY: event.deltaY,
-              modifiers: modifierBits(event),
-            })
-          }}
-          onKeyDown={(event) => sendKey(event, "keyDown")}
-          onKeyUp={(event) => sendKey(event, "keyUp")}
-          onContextMenu={(event) => {
-            if (driving) event.preventDefault()
-          }}
-        />
-        {liveStatus === "connecting" ? (
-          <span className="absolute flex items-center gap-2 text-xs text-muted-foreground">
-            <Spinner /> Connecting to the live view…
-          </span>
-        ) : null}
-        {liveStatus === "error" ? (
-          <span className="absolute text-xs text-muted-foreground">
-            The live view disconnected.
-          </span>
-        ) : null}
-      </div>
+      {view.liveView ? (
+        <BrowserStage
+          attachCanvas={attachCanvas}
+          containerRef={stageRef}
+          geometry={geometry}
+          cursor={cursor}
+          status={liveStatus}
+          owner={owner}
+          takingOver={takingOver || action.isPending}
+          send={send}
+          onTakeOver={() => action.mutate("takeover")}
+        >
+          {handingOver ? (
+            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-background/60 text-xs text-foreground backdrop-blur-[1px]">
+              <Spinner />
+              {view.handoff === "takeover"
+                ? "Waiting for the agent's current action to finish…"
+                : "Handing control back to the agent…"}
+            </div>
+          ) : null}
+        </BrowserStage>
+      ) : (
+        <Centered>
+          <Globe2 className="size-5" />
+          <p>The live view isn't available for this browser.</p>
+          <p className="max-w-xs text-xs">
+            This sandbox image needs Xvfb and ffmpeg to show the browser. The
+            agent can still use it.
+          </p>
+        </Centered>
+      )}
     </div>
   )
 }

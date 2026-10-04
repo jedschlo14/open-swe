@@ -6,8 +6,14 @@ admits the session's allowlist and nothing else, so a dead proxy means no
 network rather than an open one. Every command enters that namespace, so a
 daemon that has to be respawned is respawned inside it too.
 
+Chromium runs headed on a private virtual display (Xvfb) when the sandbox has
+Xvfb and ffmpeg (installed on first use when the sandbox can apt-get them), so
+the live view can stream real video and native widgets such as ``<select>``
+popups appear. Otherwise it runs headless and the session simply
+has no live view; the agent is unaffected.
+
 Every call goes through ``sandbox.run`` with the server's own credentials; the
-browser's DevTools and stream ports stay on the namespace's loopback.
+browser's DevTools port stays on the namespace's loopback.
 """
 
 import asyncio
@@ -16,7 +22,7 @@ import json
 import logging
 import re
 import shlex
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from functools import cache
 from importlib import resources
@@ -39,12 +45,12 @@ MAX_OUTPUT_CHARS = 40_000
 DAEMON_IDLE_GRACE_MS = 10 * 60 * 1000
 VIEWPORT_WIDTH = 1440
 VIEWPORT_HEIGHT = 900
-# Rendered at twice the viewport so the live view stays sharp on high-density (4K) displays.
-# Chrome's screencast only reaches the window's real scale factor, so the emulated one set by
-# `set viewport` is not enough: the stream stays at CSS size unless Chrome itself is launched at 2x.
-DEVICE_SCALE_FACTOR = 2
+MIN_VIEWPORT = (320, 240)
+MAX_VIEWPORT = (1920, 1200)
+RENDER_SCALE = 1.5
 _SCREENSHOT_QUALITY = 70
 _LAUNCH_TIMEOUT_SECONDS = 120
+_LIVE_WAIT_SECONDS = 30
 _COMMAND_TIMEOUT_SECONDS = 60
 _ELEMENT_LABEL_SCRIPT = (
     "(() => {{ const e = document.elementFromPoint({x}, {y}); if (!e) return null;"
@@ -52,6 +58,32 @@ _ELEMENT_LABEL_SCRIPT = (
     " return (t.getAttribute('aria-label') || t.innerText || t.value || t.title || '')"
     ".trim().slice(0, 200); }})()"
 )
+_PAGE_STATE_SCRIPT = (
+    "JSON.stringify([location.href, document.title, document.readyState !== 'complete'])"
+)
+_SELECTION_SCRIPT = (
+    "(() => { const a = document.activeElement;"
+    " if (a && typeof a.selectionStart === 'number' && a.selectionEnd > a.selectionStart)"
+    " return a.value.slice(a.selectionStart, a.selectionEnd);"
+    " return String(getSelection()); })()"
+)
+_DISPLAY_CHECK = (
+    "command -v Xvfb >/dev/null && command -v ffmpeg >/dev/null && command -v python3 >/dev/null"
+    ' && python3 -c "import ctypes;'
+    " [ctypes.CDLL(name) for name in ('libX11.so.6', 'libXfixes.so.3', 'libXtst.so.6')]\""
+    " && ffmpeg -hide_banner -devices 2>/dev/null | grep -q x11grab"
+    " && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264"
+)
+_DISPLAY_INSTALL = (
+    "export DEBIAN_FRONTEND=noninteractive;"
+    ' if [ "$(id -u)" -eq 0 ]; then SUDO=; else SUDO="sudo -n"; fi;'
+    " command -v apt-get >/dev/null && $SUDO apt-get update -qq"
+    " && $SUDO apt-get install -y -qq --no-install-recommends"
+    " xvfb ffmpeg python3 libx11-6 libxfixes3 libxtst6"
+)
+_DISPLAY_INSTALL_TIMEOUT_SECONDS = 600
+MAX_TEXT_CHARS = 20_000
+MAX_SELECTION_CHARS = 100_000
 
 
 class SandboxLostError(RuntimeError):
@@ -75,6 +107,11 @@ def _proxy_script() -> str:
     return resources.files("agent.resources").joinpath("browser", "egress_proxy.py").read_text()
 
 
+@cache
+def _live_script() -> str:
+    return resources.files("agent.resources").joinpath("browser", "live_helper.py").read_text()
+
+
 @asynccontextmanager
 async def connected(sandbox_id: str) -> AsyncIterator[AsyncSandbox]:
     from agent.sandboxes.providers.langsmith import connect_async_langsmith_sandbox
@@ -93,8 +130,20 @@ def session_dir(session: BrowserSession) -> str:
     return f"{BROWSER_ROOT}/{session.session_id}"
 
 
-def _env(session: BrowserSession) -> dict[str, str]:
-    return {
+def display_name(session: BrowserSession) -> str:
+    """The session's own X display, distinct from any other the sandbox runs."""
+    return f":{100 + int(session.session_id, 16) % 900}"
+
+
+def _display_size() -> tuple[int, int]:
+    return (
+        int(MAX_VIEWPORT[0] * RENDER_SCALE) // 2 * 2,
+        int(MAX_VIEWPORT[1] * RENDER_SCALE) // 2 * 2,
+    )
+
+
+def _env(session: BrowserSession, *, headed: bool) -> dict[str, str]:
+    env = {
         "AGENT_BROWSER_NAMESPACE": NAMESPACE,
         "AGENT_BROWSER_SESSION": session.daemon_session,
         "AGENT_BROWSER_IDLE_TIMEOUT_MS": str(
@@ -105,12 +154,17 @@ def _env(session: BrowserSession) -> dict[str, str]:
         "AGENT_BROWSER_PROXY_BYPASS": "<-loopback>",
         "AGENT_BROWSER_ALLOWED_DOMAINS": allowed_domains(session.approved_endpoints),
         "AGENT_BROWSER_MAX_OUTPUT": str(MAX_OUTPUT_CHARS),
-        "AGENT_BROWSER_ARGS": f"--force-device-scale-factor={DEVICE_SCALE_FACTOR}",
-        "AGENT_BROWSER_STREAM_QUALITY": "80",
-        # Both caps must be set, or the stream downscales frames to the viewport's CSS size.
-        "AGENT_BROWSER_STREAM_MAX_WIDTH": str(VIEWPORT_WIDTH * DEVICE_SCALE_FACTOR),
-        "AGENT_BROWSER_STREAM_MAX_HEIGHT": str(VIEWPORT_HEIGHT * DEVICE_SCALE_FACTOR),
     }
+    if headed:
+        env |= {
+            "AGENT_BROWSER_HEADED": "1",
+            "AGENT_BROWSER_NO_XVFB": "1",
+            "DISPLAY": display_name(session),
+            "AGENT_BROWSER_ARGS": ",".join(
+                (f"--force-device-scale-factor={RENDER_SCALE}", "--kiosk", "--disable-infobars")
+            ),
+        }
+    return env
 
 
 async def run_command(
@@ -119,6 +173,7 @@ async def run_command(
     args: Sequence[str],
     *,
     timeout: int = _COMMAND_TIMEOUT_SECONDS,
+    headed: bool | None = None,
 ) -> dict[str, JsonValue]:
     """Run one ``agent-browser --json`` command in the browser's namespace and return its ``data``.
 
@@ -132,7 +187,8 @@ async def run_command(
         f'out=$(mktemp) && {command} >"$out" 2>&1 </dev/null; rc=$?; '
         'cat "$out"; rm -f "$out"; exit $rc'
     )
-    result = await sandbox.run(script, env=_env(session), timeout=timeout)
+    live = session.live_view if headed is None else headed
+    result = await sandbox.run(script, env=_env(session, headed=live), timeout=timeout)
     payload = _last_json_line(result.stdout)
     if payload is None:
         raise EngineCommandError(f"agent-browser {args[0]} printed no result")
@@ -169,11 +225,6 @@ async def check_engine(sandbox: AsyncSandbox) -> None:
         raise EngineMissingError(result.stdout.strip() or result.stderr.strip())
 
 
-def _stream_port(data: Mapping[str, JsonValue]) -> int | None:
-    port = data.get("port")
-    return port if isinstance(port, int) and not isinstance(port, bool) and port > 0 else None
-
-
 async def write_allowlist(
     sandbox: AsyncSandbox, session: BrowserSession, endpoints: Sequence[str]
 ) -> None:
@@ -200,53 +251,137 @@ async def _isolate(sandbox: AsyncSandbox, session: BrowserSession) -> None:
             sandbox,
             session,
             "proxy",
-            [session.network_namespace, str(PROXY_PORT), f"{directory}/allow.json"],
+            "egress_proxy.py",
+            ["proxy", session.network_namespace, str(PROXY_PORT), f"{directory}/allow.json"],
         )
     except EngineCommandError as exc:
         raise EgressUnavailableError(str(exc)) from exc
 
 
 async def _start_helper(
-    sandbox: AsyncSandbox, session: BrowserSession, mode: str, args: Sequence[str]
+    sandbox: AsyncSandbox,
+    session: BrowserSession,
+    name: str,
+    script: str,
+    args: Sequence[str],
+    *,
+    wait_seconds: int = 5,
 ) -> str:
-    """Start one ``egress_proxy.py`` mode in the background and return its ``ready`` line."""
+    """Start one helper process in the background and return its ``ready`` line."""
     directory = session_dir(session)
-    command = shlex.join(["python3", f"{directory}/egress_proxy.py", mode, *args])
-    log = shlex.quote(f"{directory}/{mode}.log")
-    pid = shlex.quote(f"{directory}/{mode}.pid")
+    command = shlex.join(["python3", f"{directory}/{script}", *args])
+    log = shlex.quote(f"{directory}/{name}.log")
+    pid = shlex.quote(f"{directory}/{name}.pid")
     started = await sandbox.run(
         f"nohup {command} >{log} 2>&1 </dev/null & echo $! >{pid};"
-        f" for _ in $(seq 50); do line=$(grep -m1 '^ready' {log}) && echo \"$line\" && exit 0;"
-        f" sleep 0.1; done; cat {log} >&2; exit 1",
+        f" for _ in $(seq {wait_seconds * 10}); do line=$(grep -m1 '^ready' {log}) && echo \"$line\""
+        f" && exit 0; sleep 0.1; done; cat {log} >&2; exit 1",
         timeout=_COMMAND_TIMEOUT_SECONDS,
     )
     if started.exit_code != 0:
-        raise EngineCommandError(started.stderr.strip() or f"browser {mode} did not start")
+        raise EngineCommandError(started.stderr.strip() or f"browser {name} did not start")
     return started.stdout.strip()
 
 
-async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int:
-    """Launch the session's isolated browser and return the sandbox-loopback port of its stream."""
+async def _display_available(sandbox: AsyncSandbox) -> bool:
+    result = await sandbox.run(_DISPLAY_CHECK, timeout=_COMMAND_TIMEOUT_SECONDS)
+    return result.exit_code == 0
+
+
+async def _ensure_display(sandbox: AsyncSandbox) -> bool:
+    """Whether the sandbox can show the browser, installing the display packages if absent."""
+    if await _display_available(sandbox):
+        return True
+    try:
+        installed = await sandbox.run(_DISPLAY_INSTALL, timeout=_DISPLAY_INSTALL_TIMEOUT_SECONDS)
+    except Exception:
+        logger.warning("Installing the browser display packages failed", exc_info=True)
+        return False
+    if installed.exit_code != 0:
+        logger.warning(
+            "Installing the browser display packages failed",
+            extra={"exit_code": installed.exit_code, "stderr": installed.stderr[-500:]},
+        )
+        return False
+    return await _display_available(sandbox)
+
+
+async def _start_display(sandbox: AsyncSandbox, session: BrowserSession) -> None:
+    directory = shlex.quote(session_dir(session))
+    display = display_name(session)
+    width, height = _display_size()
+    socket = shlex.quote(f"/tmp/.X11-unix/X{display.lstrip(':')}")
+    started = await sandbox.run(
+        f"nohup Xvfb {display} -screen 0 {width}x{height}x24 -nolisten tcp"
+        f" >{directory}/xvfb.log 2>&1 </dev/null & echo $! >{directory}/xvfb.pid;"
+        f" for _ in $(seq 50); do [ -S {socket} ] && exit 0; sleep 0.1; done;"
+        f" cat {directory}/xvfb.log >&2; exit 1",
+        timeout=_COMMAND_TIMEOUT_SECONDS,
+    )
+    if started.exit_code != 0:
+        raise EngineCommandError(started.stderr.strip() or "the virtual display did not start")
+
+
+async def _start_live_helper(sandbox: AsyncSandbox, session: BrowserSession) -> int:
+    directory = session_dir(session)
+    await sandbox.write(f"{directory}/live_helper.py", _live_script())
+    ready = await _start_helper(
+        sandbox,
+        session,
+        "live",
+        "live_helper.py",
+        [display_name(session), str(RENDER_SCALE), str(VIEWPORT_WIDTH), str(VIEWPORT_HEIGHT)],
+        wait_seconds=_LIVE_WAIT_SECONDS,
+    )
+    port = ready.removeprefix("ready ").strip()
+    if not port.isdigit():
+        raise EngineCommandError("the live view helper did not report a port")
+    return int(port)
+
+
+async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int | None:
+    """Launch the session's isolated browser; returns the live view helper's sandbox port.
+
+    ``None`` means the sandbox cannot show the browser (no virtual display), so it
+    runs headless and only the agent uses it.
+    """
     await check_engine(sandbox)
+    live = await _ensure_display(sandbox)
     await _isolate(sandbox, session)
-    await run_command(sandbox, session, ["get", "url"], timeout=_LAUNCH_TIMEOUT_SECONDS)
-    # Without an explicit viewport the page is shorter than the size the stream reports,
-    # so frames are stretched and live-view clicks land below the pointer.
+    if live:
+        await _start_display(sandbox, session)
+    await run_command(
+        sandbox, session, ["get", "url"], timeout=_LAUNCH_TIMEOUT_SECONDS, headed=live
+    )
+    if not live:
+        await set_viewport(sandbox, session, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, headed=False)
+        return None
+    return await _start_live_helper(sandbox, session)
+
+
+def clamp_viewport(width: int, height: int) -> tuple[int, int]:
+    """``width`` by ``height`` limited to the sizes the browser supports."""
+    return (
+        min(max(width, MIN_VIEWPORT[0]), MAX_VIEWPORT[0]),
+        min(max(height, MIN_VIEWPORT[1]), MAX_VIEWPORT[1]),
+    )
+
+
+async def set_viewport(
+    sandbox: AsyncSandbox,
+    session: BrowserSession,
+    width: int,
+    height: int,
+    *,
+    headed: bool | None = None,
+) -> None:
+    """Size a headless page; a headed page follows its window, which the live helper resizes."""
     await run_command(
         sandbox,
         session,
-        ["set", "viewport", str(VIEWPORT_WIDTH), str(VIEWPORT_HEIGHT), str(DEVICE_SCALE_FACTOR)],
+        ["set", "viewport", str(width), str(height), str(RENDER_SCALE)],
+        headed=headed,
     )
-    port = _stream_port(await run_command(sandbox, session, ["stream", "status"]))
-    if port is None:
-        port = _stream_port(await run_command(sandbox, session, ["stream", "enable"]))
-    if port is None:
-        raise EngineCommandError("the browser stream did not report a port")
-    ready = await _start_helper(sandbox, session, "forward", [session.network_namespace, str(port)])
-    forwarded = ready.removeprefix("ready ").strip()
-    if not forwarded.isdigit():
-        raise EngineCommandError("the stream forward did not report a port")
-    return int(forwarded)
 
 
 async def element_label(
@@ -258,12 +393,41 @@ async def element_label(
     return result if isinstance(result, str) else None
 
 
+async def page_state(
+    sandbox: AsyncSandbox, session: BrowserSession
+) -> tuple[str, str, bool] | None:
+    """The page's URL, title, and whether it is still loading."""
+    data = await run_command(sandbox, session, ["eval", _PAGE_STATE_SCRIPT])
+    result = data.get("result")
+    if not isinstance(result, str):
+        return None
+    try:
+        url, title, loading = json.loads(result)
+    except ValueError:
+        return None
+    if isinstance(url, str) and isinstance(title, str) and isinstance(loading, bool):
+        return url, title, loading
+    return None
+
+
+async def selection_text(sandbox: AsyncSandbox, session: BrowserSession) -> str:
+    """The page's selected text, for a person's copy."""
+    data = await run_command(sandbox, session, ["eval", _SELECTION_SCRIPT])
+    result = data.get("result")
+    return result[:MAX_SELECTION_CHARS] if isinstance(result, str) else ""
+
+
+async def insert_text(sandbox: AsyncSandbox, session: BrowserSession, text: str) -> None:
+    """Insert text at the focused element as a whole, for a person's paste or composed input."""
+    await run_command(sandbox, session, ["keyboard", "inserttext", text[:MAX_TEXT_CHARS]])
+
+
 def _to_viewport_pixels(image: bytes) -> bytes:
     """Scale a device-pixel capture down to viewport pixels, the space clicks use."""
     with Image.open(io.BytesIO(image)) as source:
         size = (
-            max(round(source.width / DEVICE_SCALE_FACTOR), 1),
-            max(round(source.height / DEVICE_SCALE_FACTOR), 1),
+            max(round(source.width / RENDER_SCALE), 1),
+            max(round(source.height / RENDER_SCALE), 1),
         )
         if size == source.size:
             return image
@@ -317,7 +481,7 @@ async def screenshot(
 
 
 async def close(sandbox: AsyncSandbox, session: BrowserSession) -> None:
-    """Close the browser, take down its network, and delete everything it wrote to disk."""
+    """Close the browser, take down its network and display, and delete everything it wrote."""
     try:
         await run_command(sandbox, session, ["close"])
     except EngineCommandError:
@@ -328,8 +492,9 @@ async def close(sandbox: AsyncSandbox, session: BrowserSession) -> None:
         )
     directory = shlex.quote(session_dir(session))
     namespace = shlex.quote(session.network_namespace)
+    socket = shlex.quote(f"/tmp/.X11-unix/X{display_name(session).lstrip(':')}")
     await sandbox.run(
-        f"for pid in {directory}/proxy.pid {directory}/forward.pid;"
+        f"for pid in {directory}/live.pid {directory}/proxy.pid {directory}/xvfb.pid;"
         ' do [ -f "$pid" ] && kill $(cat "$pid") 2>/dev/null; done;'
-        f" ip netns delete {namespace} 2>/dev/null; rm -rf {directory}; true"
+        f" ip netns delete {namespace} 2>/dev/null; rm -rf {directory} {socket}; true"
     )
