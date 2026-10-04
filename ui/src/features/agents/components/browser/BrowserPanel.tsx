@@ -167,12 +167,11 @@ export function BrowserPanel(props: { threadId: string }) {
     [stageSize]
   )
   const {
-    attachRoot,
+    attachCanvas,
     send,
-    hit,
-    setDriving,
+    cursor,
     page,
-    viewport: pageViewport,
+    geometry,
     status: liveStatus,
     role,
   } = useBrowserLive(
@@ -406,11 +405,10 @@ export function BrowserPanel(props: { threadId: string }) {
       ) : null}
       {view.liveView ? (
         <BrowserStage
-          attachRoot={attachRoot}
+          attachCanvas={attachCanvas}
           containerRef={stageRef}
-          viewport={pageViewport}
-          hit={hit}
-          setDriving={setDriving}
+          geometry={geometry}
+          cursor={cursor}
           status={liveStatus}
           owner={owner}
           takingOver={takingOver || action.isPending}
@@ -431,8 +429,8 @@ export function BrowserPanel(props: { threadId: string }) {
           <Globe2 className="size-5" />
           <p>The live view isn't available for this browser.</p>
           <p className="max-w-xs text-xs">
-            The sandbox couldn't start the live view for this browser. The agent
-            can still use it.
+            This sandbox image needs Xvfb and ffmpeg to show the browser. The
+            agent can still use it.
           </p>
         </Centered>
       )}

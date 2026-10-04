@@ -5,24 +5,21 @@ keeping it alive, and confirming a held action need thread-write access, checked
 on every request.
 """
 
-import time
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
+from fastapi import APIRouter, HTTPException, Response, WebSocket
 from pydantic import BaseModel, ConfigDict, JsonValue
 from pydantic.alias_generators import to_camel
 
 from agent.browser import engine, lease, live, manager, sign_ins, store
-from agent.browser.live import assets
 from agent.browser.models import BrowserSession, BrowserSessionView
 from agent.browser.policy import endpoint_of
 from agent.dashboard.deps import SESSION_DEP
 from agent.dashboard.oauth import (
     BrowserTicket,
     BrowserTicketRole,
-    decode_browser_asset_ticket,
     decode_browser_ticket,
     issue_browser_ticket,
 )
@@ -31,10 +28,6 @@ from agent.utils.json_types import thread_metadata
 from agent.utils.thread_ops import langgraph_client, langgraph_url
 
 router = APIRouter(tags=["browser"])
-
-_ASSET_ACCESS_SECONDS = 5.0
-_asset_access_checked: dict[tuple[str, str], float] = {}
-_PASSTHROUGH_ASSET_HEADERS = ("content-type", "content-length", "etag", "last-modified")
 
 
 class ConfirmationDecision(BaseModel):
@@ -237,46 +230,6 @@ async def api_browser_live(websocket: WebSocket, thread_id: str) -> None:
         return
     await websocket.accept(subprotocol=live.SUBPROTOCOL)
     await live.relay(websocket, current, ticket, authorize)
-
-
-@router.get("/threads/{thread_id}/browser/assets/{ticket}/{kind}/{resource:path}")
-async def api_browser_asset(
-    thread_id: str, ticket: str, kind: str, resource: str, request: Request
-) -> Response:
-    """One resource of the page a live view shows, loaded by the session's own browser."""
-    holder = decode_browser_asset_ticket(ticket, thread_id=thread_id)
-    now = time.monotonic()
-    key = (thread_id, holder.login)
-    if now - _asset_access_checked.get(key, float("-inf")) >= _ASSET_ACCESS_SECONDS:
-        await _readable(thread_id, {"sub": holder.login, "email": holder.email})
-        _asset_access_checked[key] = now
-    current = await manager.current(thread_id)
-    if current is None or current.state != "ready" or not current.live_view:
-        raise HTTPException(409, "the browser is not running")
-    if kind in ("http", "https"):
-        query = f"?{request.url.query}" if request.url.query else ""
-        url = f"{kind}://{resource}{query}"
-    elif kind == "font":
-        url = f"font:{resource}"
-    else:
-        raise HTTPException(404, "unknown resource")
-    try:
-        asset = await assets.fetch(current, url)
-    except (assets.AssetUnavailableError, OSError) as exc:
-        raise HTTPException(502, "the browser could not load this resource") from exc
-    headers = {
-        name: value
-        for name, value in asset.headers.items()
-        if name.lower() in _PASSTHROUGH_ASSET_HEADERS and name.lower() != "content-length"
-    }
-    headers |= {
-        "Cache-Control": "private, max-age=300",
-        "Content-Security-Policy": "sandbox",
-        "X-Content-Type-Options": "nosniff",
-        "Cross-Origin-Resource-Policy": "cross-origin",
-        "Access-Control-Allow-Origin": "*",
-    }
-    return Response(content=asset.body, status_code=asset.status, headers=headers)
 
 
 @router.post("/threads/{thread_id}/browser/takeover")

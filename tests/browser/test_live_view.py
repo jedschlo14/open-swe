@@ -1,5 +1,6 @@
-"""The live view's wire: what a viewer may send and what the bridge replays to a late viewer."""
+"""The live view's transport: what a slow viewer drops and what the sandbox helper emits."""
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -7,66 +8,76 @@ from types import ModuleType
 
 import pytest
 
-from agent.browser.live import messages
 from agent.browser.live.actions import with_scheme
+from agent.browser.live.video import Outbox
 
-_BRIDGE = Path(__file__).parents[2] / "agent" / "resources" / "browser" / "mirror_bridge.py"
+_HELPER = Path(__file__).parents[2] / "agent" / "resources" / "browser" / "live_helper.py"
 
 
 @pytest.fixture(scope="module")
-def bridge() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("mirror_bridge", _BRIDGE)
+def helper() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("live_helper", _HELPER)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-class _Writer:
-    def __init__(self) -> None:
-        self.frames: list[bytes] = []
-
-    def write(self, data: bytes) -> None:
-        self.frames.append(data)
-
-
-def _event(kind: int, **data: object) -> str:
-    return json.dumps({"type": kind, "data": data, "timestamp": 1})
-
-
-def test_a_late_viewer_replays_from_the_last_snapshot(bridge: ModuleType) -> None:
-    mirror = bridge.Mirror("", "")
-    meta, snapshot = _event(4, href="http://localhost/"), _event(2, node={})
-    mirror.ingest("n4" + meta)
-    mirror.ingest("n2" + snapshot)
-    mirror.ingest("n3" + _event(3, source=0))
-    mirror.ingest("c2" + _event(2, node={"fresh": True}))
-    mirror.ingest("n3" + _event(3, source=1))
-    viewer = bridge.Viewer(_Writer())
-
-    mirror.send_state(viewer)
-
-    sent = [frame for frame in viewer.writer.frames if frame[:1] == bridge.KIND_EVENTS]
-    events = json.loads(sent[0][5:])
-    assert [event["type"] for event in events] == [4, 2, 3]
-    assert events[1]["data"] == {"node": {"fresh": True}}
-
-
-def test_a_press_carries_the_element_it_landed_on() -> None:
-    press = messages.parse(
-        json.dumps(
-            {
-                "type": "mouse",
-                "action": "down",
-                "x": 10,
-                "y": 20,
-                "anchor": {"id": 7, "fx": 0.25, "fy": 0.5},
-            }
-        )
+def _unit(*nal_types: int) -> bytes:
+    return b"".join(
+        b"\x00\x00\x00\x01" + bytes([0x60 | nal_type, 0x42, 0xC0, 0x28, 1, 2])
+        for nal_type in nal_types
     )
-    assert isinstance(press, messages.MouseMessage)
-    assert press.model_dump(exclude_none=True)["anchor"] == {"id": 7, "fx": 0.25, "fy": 0.5}
-    assert messages.parse(json.dumps({"type": "choice", "id": -1, "value": "x"})) is None
+
+
+async def _drain(outbox: Outbox) -> list[str | bytes]:
+    items: list[str | bytes] = []
+    while True:
+        try:
+            items.append(await asyncio.wait_for(outbox.next(), 0.01))
+        except TimeoutError:
+            return items
+
+
+async def test_a_slow_viewer_skips_to_the_next_key_frame_but_never_loses_messages() -> None:
+    outbox = Outbox()
+    outbox.frame(b"\x01key")
+    for index in range(10):
+        outbox.frame(b"\x00" + bytes([index]))
+    outbox.message({"type": "page", "url": "http://localhost:3000/"})
+    outbox.frame(b"\x00late")
+    outbox.frame(b"\x01fresh")
+
+    assert await _drain(outbox) == [
+        json.dumps({"type": "page", "url": "http://localhost:3000/"}),
+        b"\x01fresh",
+    ]
+
+
+async def test_a_new_viewer_gets_no_delta_frames_before_a_key_frame() -> None:
+    outbox = Outbox()
+    outbox.frame(b"\x00delta")
+    outbox.frame(b"\x01key")
+
+    assert await _drain(outbox) == [b"\x01key"]
+
+
+def test_access_units_split_at_delimiters_and_the_last_stays_buffered(helper: ModuleType) -> None:
+    first, second, third = _unit(9, 7, 8, 5), _unit(9, 1), _unit(9, 1)
+    buffer = bytearray(first + second + third)
+
+    assert list(helper.split_access_units(buffer)) == [first, second]
+    assert bytes(buffer) == third
+    assert helper.nal_types(first) == [9, 7, 8, 5]
+    assert helper.codec_bytes(first) == bytes([0x42, 0xC0, 0x28])
+
+
+def test_browser_keys_map_to_x_keysyms(helper: ModuleType) -> None:
+    assert helper.keysym_for("a", "KeyA") == ord("a")
+    assert helper.keysym_for("Enter", "Enter") == 0xFF0D
+    assert helper.keysym_for("Shift", "ShiftRight") == 0xFFE2
+    assert helper.keysym_for("世", "KeyX") == 0x1000000 | ord("世")
+    assert helper.keysym_for("Dead", "KeyE") is None
 
 
 @pytest.mark.parametrize(

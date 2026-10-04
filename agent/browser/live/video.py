@@ -1,61 +1,114 @@
 """Relays a thread browser's live view to one dashboard viewer.
 
-The server opens a LangSmith tunnel to the mirror bridge in the sandbox and copies
-what it records to the viewer, so the provider URL never reaches the client. The
-viewer rebuilds the page from those events as a real document. Access is checked on
-connect and rechecked while the view is open; the connection closes when the viewer
-loses access or the session it was opened for ends. Input passes only for a viewer
-who holds the lease, checked again for every press, release, wheel tick, and key.
+The server opens a LangSmith tunnel to the live helper in the sandbox and copies
+its H.264 video, cursor shape, and status to the viewer, so the provider URL never
+reaches the client. Access is checked on connect and rechecked while the view is
+open; the connection closes when the viewer loses access or the session it was
+opened for ends. Input passes only for a viewer who holds the lease, checked again
+for every press, release, wheel tick, and key.
 
-To the viewer, a JSON array is a batch of page events and a JSON object is a message
-(page state, a reset, fonts, a notice, clipboard text, the resource ticket).
+To the viewer, video is a binary message (a flag byte, three codec bytes on key
+frames, then Annex-B data); everything else is JSON text.
 """
 
 import asyncio
 import json
 import logging
+import struct
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 
 from fastapi import WebSocket, WebSocketDisconnect
 from langsmith.sandbox import AsyncSandbox
 
 from agent.browser import engine, manager
-from agent.browser.live import bridge, messages
+from agent.browser.live import messages
 from agent.browser.live.actions import PersonActions
 from agent.browser.live.gate import Authorizer, ControlGate, ViewportSync
 from agent.browser.models import BrowserSession
-from agent.dashboard.oauth import BrowserTicket, issue_browser_asset_ticket
+from agent.dashboard.oauth import BrowserTicket
 
 logger = logging.getLogger(__name__)
 
 SUBPROTOCOL = "open-swe-browser"
 _SLOTS = asyncio.Semaphore(40)
 _RECHECK_SECONDS = 5.0
+_PAGE_POLL_SECONDS = 1.0
+_MAX_QUEUED_FRAMES = 6
+_HELPER_VIDEO, _HELPER_CURSOR, _HELPER_STATUS = b"V", b"C", b"S"
+_HELPER_INPUT, _HELPER_RESIZE = b"I", b"R"
+_KEY_FRAME = 1
+_HELPER_TEXT_TYPES = {_HELPER_CURSOR: "cursor", _HELPER_STATUS: "status"}
 
 
-class Outbound:
-    """Everything bound for one viewer, sent one message at a time."""
+class Outbox:
+    """Everything bound for one viewer; slow viewers lose video frames, never messages.
 
-    def __init__(self, websocket: WebSocket) -> None:
-        self._websocket = websocket
-        self._lock = asyncio.Lock()
-        self._background: set[asyncio.Task[None]] = set()
+    A viewer that falls behind skips to the next key frame instead of replaying a
+    backlog, so lag stays bounded without corrupting the picture.
+    """
 
-    async def text(self, payload: str) -> None:
-        async with self._lock:
-            await self._websocket.send_text(payload)
+    def __init__(self) -> None:
+        self._messages: deque[str] = deque()
+        self._frames: deque[bytes] = deque()
+        self._need_key = True
+        self._wake = asyncio.Event()
 
     def message(self, payload: Mapping[str, object]) -> None:
-        task = asyncio.create_task(self.text(json.dumps(payload)))
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        self._messages.append(json.dumps(payload))
+        self._wake.set()
+
+    def frame(self, data: bytes) -> None:
+        if data[0] & _KEY_FRAME:
+            self._frames.clear()
+            self._need_key = False
+        elif self._need_key:
+            return
+        elif len(self._frames) >= _MAX_QUEUED_FRAMES:
+            self._frames.clear()
+            self._need_key = True
+            return
+        self._frames.append(data)
+        self._wake.set()
+
+    async def next(self) -> str | bytes:
+        while True:
+            if self._messages:
+                return self._messages.popleft()
+            if self._frames:
+                return self._frames.popleft()
+            self._wake.clear()
+            await self._wake.wait()
 
 
-async def _read_bridge(reader: asyncio.StreamReader, outbound: Outbound) -> None:
+async def _read_helper(reader: asyncio.StreamReader, outbox: Outbox) -> None:
     while True:
-        kind, payload = await bridge.read_frame(reader)
-        if kind in (bridge.KIND_EVENTS, bridge.KIND_JSON):
-            await outbound.text(payload.decode())
+        header = await reader.readexactly(5)
+        payload = await reader.readexactly(struct.unpack(">I", header[1:])[0])
+        kind = header[:1]
+        if kind == _HELPER_VIDEO:
+            outbox.frame(payload)
+        elif kind in _HELPER_TEXT_TYPES:
+            try:
+                body = json.loads(payload)
+            except ValueError:
+                continue
+            if isinstance(body, dict):
+                outbox.message({"type": _HELPER_TEXT_TYPES[kind], **body})
+
+
+async def _send_outbox(websocket: WebSocket, outbox: Outbox) -> None:
+    while True:
+        item = await outbox.next()
+        if isinstance(item, bytes):
+            await websocket.send_bytes(item)
+        else:
+            await websocket.send_text(item)
+
+
+def _helper_send(writer: asyncio.StreamWriter, kind: bytes, body: dict[str, object]) -> None:
+    payload = json.dumps(body).encode()
+    writer.write(kind + struct.pack(">I", len(payload)) + payload)
 
 
 async def _run_person_actions(
@@ -71,6 +124,25 @@ async def _run_person_actions(
                 exc_info=True,
                 extra={"browser_session_id": session.session_id},
             )
+
+
+async def _poll_page(sandbox: AsyncSandbox, session: BrowserSession, outbox: Outbox) -> None:
+    sent: tuple[str, str, bool] | None = None
+    while True:
+        try:
+            state = await engine.page_state(sandbox, session)
+        except engine.EngineCommandError:
+            logger.debug(
+                "Browser page state lookup failed",
+                exc_info=True,
+                extra={"browser_session_id": session.session_id},
+            )
+            state = None
+        if state is not None and state != sent:
+            sent = state
+            url, title, loading = state
+            outbox.message({"type": "page", "url": url, "title": title, "loading": loading})
+        await asyncio.sleep(_PAGE_POLL_SECONDS)
 
 
 async def _upstream(
@@ -92,8 +164,8 @@ async def _upstream(
         if not await gate.allows(discrete):
             continue
         match message:
-            case messages.MouseMessage() | messages.KeyMessage() | messages.ChoiceMessage():
-                bridge.write_json(writer, bridge.KIND_INPUT, message.model_dump(exclude_none=True))
+            case messages.MouseMessage() | messages.KeyMessage():
+                _helper_send(writer, _HELPER_INPUT, message.model_dump())
             case messages.CopyMessage():
                 await actions.copy(message)
             case messages.PasteMessage():
@@ -124,37 +196,21 @@ async def _serve(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
-    outbound = Outbound(websocket)
-    await outbound.text(
-        json.dumps(
-            {
-                "type": "assets",
-                "ticket": issue_browser_asset_ticket(
-                    login=ticket.login, email=ticket.email, thread_id=session.thread_id
-                ),
-            }
-        )
-    )
-    bridge.write_json(writer, bridge.KIND_HELLO, {"role": "view"})
-    bridge.write_json(writer, bridge.KIND_CONTROL, {"type": "fonts"})
+    outbox = Outbox()
     tasks = {
-        asyncio.create_task(_read_bridge(reader, outbound)),
+        asyncio.create_task(_read_helper(reader, outbox)),
+        asyncio.create_task(_send_outbox(websocket, outbox)),
         asyncio.create_task(_watch(session, authorize, websocket)),
+        asyncio.create_task(_poll_page(sandbox, session, outbox)),
     }
     if ticket.role == "control":
         gate = ControlGate(session, ticket.login, authorize)
         queue: asyncio.Queue[Callable[[], Awaitable[None]]] = asyncio.Queue()
-        actions = PersonActions(sandbox, session, outbound.message)
+        actions = PersonActions(sandbox, session, outbox.message)
 
         async def resize(width: int, height: int) -> None:
-            try:
-                await engine.set_viewport(sandbox, session, width, height)
-            except engine.EngineCommandError:
-                logger.warning(
-                    "Browser resize failed",
-                    exc_info=True,
-                    extra={"browser_session_id": session.session_id},
-                )
+            _helper_send(writer, _HELPER_RESIZE, {"width": width, "height": height})
+            await writer.drain()
 
         viewport = ViewportSync(session, gate, resize)
         tasks |= {

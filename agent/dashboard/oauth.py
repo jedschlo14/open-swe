@@ -46,8 +46,6 @@ TERMINAL_TICKET_TTL_SECONDS = 60
 TERMINAL_TICKET_AUDIENCE = "open-swe-cloud-terminal"
 BROWSER_TICKET_TTL_SECONDS = 60
 BROWSER_TICKET_AUDIENCE = "open-swe-browser-live"
-BROWSER_ASSET_TICKET_TTL_SECONDS = 12 * 60 * 60
-BROWSER_ASSET_TICKET_AUDIENCE = "open-swe-browser-assets"
 BrowserTicketRole = Literal["view", "control"]
 JWT_ALG = "HS256"
 
@@ -86,52 +84,21 @@ def decode_terminal_ticket(token: str, *, thread_id: str) -> dict[str, Any]:
     return {"sub": login, "email": email if isinstance(email, str) else None}
 
 
-def _issue_browser_ticket(
-    *,
-    audience: str,
-    ttl_seconds: int,
-    login: str,
-    email: str | None,
-    thread_id: str,
-    role: BrowserTicketRole,
+def issue_browser_ticket(
+    *, login: str, email: str | None, thread_id: str, role: BrowserTicketRole
 ) -> str:
+    """A short-lived ticket for one live-view connection; the role caps what it may send."""
     now = int(time.time())
     payload = {
-        "aud": audience,
+        "aud": BROWSER_TICKET_AUDIENCE,
         "sub": login,
         "email": email,
         "thread_id": thread_id,
         "role": role,
         "iat": now,
-        "exp": now + ttl_seconds,
+        "exp": now + BROWSER_TICKET_TTL_SECONDS,
     }
     return jwt.encode(payload, _secret(), algorithm=JWT_ALG)
-
-
-def issue_browser_ticket(
-    *, login: str, email: str | None, thread_id: str, role: BrowserTicketRole
-) -> str:
-    """A short-lived ticket for one live-view connection; the role caps what it may send."""
-    return _issue_browser_ticket(
-        audience=BROWSER_TICKET_AUDIENCE,
-        ttl_seconds=BROWSER_TICKET_TTL_SECONDS,
-        login=login,
-        email=email,
-        thread_id=thread_id,
-        role=role,
-    )
-
-
-def issue_browser_asset_ticket(*, login: str, email: str | None, thread_id: str) -> str:
-    """A ticket that lets a live view's page load its resources; access is rechecked per request."""
-    return _issue_browser_ticket(
-        audience=BROWSER_ASSET_TICKET_AUDIENCE,
-        ttl_seconds=BROWSER_ASSET_TICKET_TTL_SECONDS,
-        login=login,
-        email=email,
-        thread_id=thread_id,
-        role="view",
-    )
 
 
 class BrowserTicket(BaseModel):
@@ -141,22 +108,12 @@ class BrowserTicket(BaseModel):
 
 
 def decode_browser_ticket(token: str, *, thread_id: str) -> BrowserTicket:
-    return _decode_browser_ticket(token, audience=BROWSER_TICKET_AUDIENCE, thread_id=thread_id)
-
-
-def decode_browser_asset_ticket(token: str, *, thread_id: str) -> BrowserTicket:
-    return _decode_browser_ticket(
-        token, audience=BROWSER_ASSET_TICKET_AUDIENCE, thread_id=thread_id
-    )
-
-
-def _decode_browser_ticket(token: str, *, audience: str, thread_id: str) -> BrowserTicket:
     try:
         payload = jwt.decode(
             token,
             _secret(),
             algorithms=[JWT_ALG],
-            audience=audience,
+            audience=BROWSER_TICKET_AUDIENCE,
             options={"require": ["aud", "sub", "thread_id", "role", "iat", "exp"]},
         )
     except jwt.PyJWTError as exc:
