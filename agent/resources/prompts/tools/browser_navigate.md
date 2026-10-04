@@ -7,3 +7,5 @@ The browser reaches only this sandbox's own servers and the external endpoints a
 Use this tool rather than running `agent-browser` from the shell: a browser you launch yourself has none of these limits, and nobody can watch it.
 
 The result reports `status` (`ok`, `refused`, `unavailable`, `user_in_control`, or `error`) with the page's `url` and `title`. If `status` is `unavailable` because an earlier session failed, this call starts a fresh browser: earlier page state is gone, so say so when it matters.
+
+If the page asks for a sign-in, call `browser_use_saved_sign_in` with the site's origin before anything else. Never sign in with credentials printed on the page or found elsewhere; if no saved sign-in works, ask the person to take control and sign in.

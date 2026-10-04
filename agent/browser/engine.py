@@ -173,7 +173,13 @@ def _env(session: BrowserSession, *, headed: bool) -> dict[str, str]:
             "AGENT_BROWSER_NO_XVFB": "1",
             "DISPLAY": display_name(session),
             "AGENT_BROWSER_ARGS": ",".join(
-                (f"--force-device-scale-factor={RENDER_SCALE}", "--kiosk", "--disable-infobars")
+                (
+                    f"--force-device-scale-factor={RENDER_SCALE}",
+                    "--kiosk",
+                    "--disable-infobars",
+                    "--disable-save-password-bubble",
+                    "--disable-features=PasswordManagerOnboarding",
+                )
             ),
         }
     return env
