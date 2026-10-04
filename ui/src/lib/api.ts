@@ -310,6 +310,10 @@ export interface WorkspaceSettings {
   /** Experimental: approve and merge tiny PRs from their Slack thread. Off by default. */
   expedited_review_enabled?: boolean
   org_guidelines?: string | null
+  /** Minutes a thread's browser may sit unused before it stops (5 to 480). */
+  browser_idle_timeout_minutes?: number | null
+  /** External origins thread browsers may reach, as `host:port`. */
+  browser_approved_dev_endpoints?: Array<string> | null
   default_agent_model?: string | null
   default_agent_reasoning_effort?: string | null
   default_agent_subagent_model?: string | null
