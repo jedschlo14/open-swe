@@ -31,17 +31,24 @@ interface BrowserStageProps {
   status: BrowserLiveStatus
   owner: StageOwner
   takingOver: boolean
+  loginWall?: boolean
   send: (message: BrowserClientMessage) => void
   onTakeOver: () => void
   children?: ReactNode
 }
 
-function ownerChip(owner: StageOwner, takingOver: boolean): string | null {
+function ownerChip(
+  owner: StageOwner,
+  takingOver: boolean,
+  loginWall: boolean
+): string | null {
   if (takingOver) return "Taking control…"
   if (owner.kind === "you") return null
   if (owner.kind === "agent")
     return owner.canTakeOver
-      ? "The agent is driving."
+      ? loginWall
+        ? "The agent is driving. Take control, sign in, then hand back."
+        : "The agent is driving."
       : "The agent is driving. View only."
   return `${owner.login ?? "A person"} is in control`
 }
@@ -171,7 +178,7 @@ export function BrowserStage(props: BrowserStageProps) {
     else held.current.set(plan.code, plan.key)
   }
 
-  const chip = ownerChip(owner, props.takingOver)
+  const chip = ownerChip(owner, props.takingOver, props.loginWall === true)
   const geometry = props.geometry
   return (
     <div

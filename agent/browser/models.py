@@ -132,6 +132,7 @@ class BrowserSessionView(BaseModel):
     handoff: Handoff | None = None
     viewer_controls: bool = False
     can_save_sign_in: bool = False
+    approved_endpoints: list[str] = []
     pending_confirmation: PendingConfirmation | None = None
     live_view: bool = False
 

@@ -158,6 +158,8 @@ export interface BrowserSessionView {
   viewerControls: boolean
   /** Whether the person asking may save the page's sign-in for their private threads. */
   canSaveSignIn: boolean
+  /** The external `host:port` endpoints an admin approved; only sent when the person may save a sign-in. */
+  approvedEndpoints: Array<string>
   pendingConfirmation: BrowserPendingConfirmation | null
   /** Whether the browser runs on a display the dashboard can stream. */
   liveView: boolean
@@ -558,6 +560,11 @@ export const agentsApi = {
     agentsRequest<BrowserSessionView>(
       `/threads/${encodeURIComponent(threadId)}/browser/confirmations/${encodeURIComponent(confirmationId)}`,
       { method: "POST", body: JSON.stringify({ approve }) }
+    ),
+  handBackBrowser: (threadId: string, saveSignIn: boolean) =>
+    agentsRequest<BrowserSessionView>(
+      `/threads/${encodeURIComponent(threadId)}/browser/handback`,
+      { method: "POST", body: JSON.stringify({ saveSignIn }) }
     ),
   saveBrowserSignIn: (threadId: string) =>
     agentsRequest<SavedBrowserSignIn>(

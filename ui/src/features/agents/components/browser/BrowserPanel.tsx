@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ReactNode } from "react"
 import {
   Bot,
+  Ellipsis,
   Globe2,
   Hand,
   KeyRound,
@@ -14,6 +15,8 @@ import { useCallback, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "@/components/ui/menu"
 import { Spinner } from "@/components/ui/spinner"
 import { agentsApi, SAVED_SIGN_INS_QUERY_KEY } from "@/features/agents/lib/api"
 import type {
@@ -28,6 +31,10 @@ import {
   type StageOwner,
 } from "@/features/agents/components/browser/BrowserStage"
 import { BrowserToolbar } from "@/features/agents/components/browser/BrowserToolbar"
+import {
+  looksLikeLoginWall,
+  signInTarget,
+} from "@/features/agents/components/browser/browserSignIn"
 import {
   viewportFor,
   type ViewportSize,
@@ -61,6 +68,13 @@ function formatExpiry(expiresAt: string): string {
   return new Date(expiresAt).toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",
+  })
+}
+
+function formatDay(value: string): string {
+  return new Date(value).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
   })
 }
 
@@ -180,6 +194,12 @@ export function BrowserPanel(props: { threadId: string }) {
     viewport
   )
   const canControl = role !== "view"
+  const savedSignIns = useQuery({
+    queryKey: SAVED_SIGN_INS_QUERY_KEY,
+    queryFn: agentsApi.getSavedBrowserSignIns,
+    enabled: status.data?.canSaveSignIn === true,
+  })
+  const [rememberFor, setRememberFor] = useState<string | null>(null)
 
   const update = (view: BrowserSessionView) =>
     queryClient.setQueryData(browserQueryKey(threadId), view)
@@ -201,6 +221,36 @@ export function BrowserPanel(props: { threadId: string }) {
     onError: (error) =>
       toast.error(
         error instanceof Error ? error.message : "Couldn't save the sign-in."
+      ),
+  })
+  const handBack = useMutation({
+    mutationFn: (input: { save: boolean; offerHost: string | null }) =>
+      agentsApi.handBackBrowser(threadId, input.save),
+    onSuccess: (view, input) => {
+      update(view)
+      if (input.save) {
+        void queryClient.invalidateQueries({
+          queryKey: SAVED_SIGN_INS_QUERY_KEY,
+        })
+        toast.success(
+          "Saved your sign-in and handed control back to the agent."
+        )
+      } else if (input.offerHost) {
+        toast(`Signed in to ${input.offerHost}?`, {
+          description:
+            "Take control again and tick Remember my sign-in when you hand back.",
+          action: {
+            label: "Take control",
+            onClick: () => action.mutate("takeover"),
+          },
+        })
+      }
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Couldn't hand control back to the agent."
       ),
   })
   const decide = useMutation({
@@ -300,22 +350,44 @@ export function BrowserPanel(props: { threadId: string }) {
     </Button>
   ) : null
 
-  const signInButton = view.canSaveSignIn ? (
-    <Button
-      className="cursor-pointer"
-      size="sm"
-      variant="outline"
-      title="Keep this page's sign-in so the agent can reuse it in your private threads for 30 days"
-      disabled={saveSignIn.isPending}
-      onClick={() => saveSignIn.mutate()}
-    >
-      {saveSignIn.isPending ? <Spinner /> : <KeyRound />}
-      Save sign-in
-    </Button>
+  const target = driving
+    ? signInTarget(page?.url, view.approvedEndpoints)
+    : null
+  const saved = target
+    ? savedSignIns.data?.find(
+        (item) => item.origin === target.origin && item.status === "active"
+      )
+    : undefined
+  const remember = target !== null && rememberFor === target.origin
+  const signInMenu = target ? (
+    <Menu>
+      <MenuTrigger
+        render={
+          <Button
+            aria-label="More browser actions"
+            className="cursor-pointer"
+            size="icon-sm"
+            variant="ghost"
+            title="More browser actions"
+          />
+        }
+      >
+        <Ellipsis />
+      </MenuTrigger>
+      <MenuPopup align="end">
+        <MenuItem
+          disabled={saveSignIn.isPending}
+          onClick={() => saveSignIn.mutate()}
+        >
+          <KeyRound />
+          {saved ? "Update" : "Save"} sign-in for {target.host}
+        </MenuItem>
+      </MenuPopup>
+    </Menu>
   ) : null
   const trailing = (
     <>
-      {signInButton}
+      {signInMenu}
       {stopButton}
     </>
   )
@@ -335,26 +407,53 @@ export function BrowserPanel(props: { threadId: string }) {
         </div>
       )}
       {driving ? (
-        <div className="flex items-center gap-2 border-b border-border bg-primary/10 px-3 py-1.5 text-xs">
-          <Hand className="size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1">
-            <span className="font-medium">You're in control.</span> The agent is
-            paused and won't act until you hand back.
-          </span>
-          <Button
-            className="cursor-pointer"
-            size="sm"
-            variant="outline"
-            disabled={action.isPending || handingOver}
-            onClick={() => action.mutate("handback")}
-          >
-            {action.isPending && action.variables === "handback" ? (
-              <Spinner />
-            ) : (
-              <Bot />
-            )}
-            Hand back to agent
-          </Button>
+        <div className="flex flex-col gap-2 border-b border-border bg-primary/10 px-3 py-1.5 text-xs">
+          <div className="flex items-center gap-2">
+            <Hand className="size-3.5 shrink-0" />
+            <span className="min-w-0 flex-1">
+              <span className="font-medium">You're in control.</span> The agent
+              is paused and won't act until you hand back.
+            </span>
+            <Button
+              className="cursor-pointer"
+              size="sm"
+              variant="outline"
+              disabled={handBack.isPending || action.isPending || handingOver}
+              onClick={() =>
+                handBack.mutate({
+                  save: remember,
+                  offerHost: target && !saved && !remember ? target.host : null,
+                })
+              }
+            >
+              {handBack.isPending ? <Spinner /> : <Bot />}
+              Hand back to agent
+            </Button>
+          </div>
+          {target ? (
+            <label className="flex cursor-pointer items-start gap-2">
+              <Checkbox
+                className="mt-0.5"
+                checked={remember}
+                onCheckedChange={(checked) =>
+                  setRememberFor(checked ? target.origin : null)
+                }
+              />
+              <span className="min-w-0 flex-1">
+                <span className="font-medium">
+                  {saved ? "Update my saved sign-in" : "Remember my sign-in"} to{" "}
+                  {target.host}
+                </span>
+                <span className="block text-muted-foreground">
+                  {saved
+                    ? `Saved, expires ${formatDay(saved.expiresAt)}. `
+                    : ""}
+                  Only your private threads can reuse it, for 30 days. Revoke it
+                  in Settings.
+                </span>
+              </span>
+            </label>
+          ) : null}
         </div>
       ) : view.liveView && canControl && view.controller === "user" ? (
         <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs">
@@ -412,6 +511,7 @@ export function BrowserPanel(props: { threadId: string }) {
           status={liveStatus}
           owner={owner}
           takingOver={takingOver || action.isPending}
+          loginWall={looksLikeLoginWall(page?.url)}
           send={send}
           onTakeOver={() => action.mutate("takeover")}
         >
