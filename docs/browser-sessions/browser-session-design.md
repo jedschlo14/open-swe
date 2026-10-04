@@ -14,6 +14,6 @@ Limit MVP to local/test apps and low-privilege test accounts. Isolate profiles b
 
 For UI-bug-fix and UI-change PRs, include a sanitized before/after screenshot pair when the browser can reproduce the original and verify the result, if safe and useful. Add a short recording only when it materially adds evidence. For other work, capture only when requested or useful. Preserve repository access controls; omit unsafe or unavailable evidence with an explanation. Keep captures out of the PR's branch and history: published evidence lives only on a separate evidence branch of the repository, and is deleted after 30 days.
 
-External-site browsing, saved authentication, uploads, multiple tabs or engines, a visible desktop, and cross-thread profiles are out of scope. Any future saved authentication needs explicit ownership, destination restrictions, expiry, and revocation; it is not a general credential vault.
+External-site browsing beyond admin-approved endpoints, uploads, multiple tabs or engines, headed mode, and cross-thread profiles are out of scope. The one saved authentication is a session (cookies and localStorage) a person saves after signing in during a takeover: per person, bound to one approved external origin, usable only in that person's private threads, expiring after 30 days, and revocable from their settings. It is not a general credential vault: no passwords are stored, and a restored session is as visible to the agent as the page itself.
 
 See [implementation](browser-session-implementation.md) for architecture and acceptance requirements.

@@ -9,12 +9,14 @@ import base64
 import json
 
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
+from agent.audit_logs.tools import audit_tool
 from agent.browser import broker, evidence, manager
 from agent.browser.broker import BrowserOutcome
 from agent.browser.evidence import Label
 from agent.browser.ops import ActOp, NavigateOp, ScreenshotOp, SnapshotOp
+from agent.credential_scope import private_credential_login
 from agent.prompts import prompt
 from agent.run_config import RunConfig
 
@@ -26,6 +28,7 @@ BROWSER_TOOL_NAMES = (
     "browser_act",
     "browser_screenshot",
     "browser_publish_screenshot",
+    "browser_use_saved_sign_in",
     "browser_stop",
 )
 
@@ -51,6 +54,12 @@ class _ActArgs(BaseModel):
     confirmation_id: str | None = Field(
         default=None,
         description="Only after a person approved this exact operation in the Browser panel.",
+    )
+
+
+class _SignInArgs(BaseModel):
+    origin: str = Field(
+        description="The external origin to sign in to, e.g. https://staging.example.com."
     )
 
 
@@ -151,6 +160,26 @@ async def browser_publish_screenshot(label: Label, caption: str) -> str:
     return json.dumps({"status": "ok", "markdown": published.markdown})
 
 
+@audit_tool()
+async def browser_use_saved_sign_in(origin: str) -> dict[str, JsonValue]:
+    thread_id, workspace = _context()
+    try:
+        owner = await private_credential_login()
+    except RuntimeError:
+        owner = None
+    if owner is None:
+        return {
+            "ok": False,
+            "status": "refused",
+            "message": "Saved sign-ins can only be used in a private thread its owner started.",
+        }
+    outcome = await broker.restore_sign_in(thread_id, origin, owner=owner, workspace_slug=workspace)
+    return {
+        "ok": outcome.status == "ok",
+        **outcome.model_dump(exclude={"snapshot", "image_base64"}, exclude_none=True),
+    }
+
+
 async def browser_stop() -> str:
     thread_id, _ = _context()
     stopped = await manager.stop_session(thread_id, "requested")
@@ -188,6 +217,12 @@ def browser_tools() -> list[BaseTool]:
             name="browser_publish_screenshot",
             description=prompt("tools/browser_publish_screenshot"),
             args_schema=_PublishArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=browser_use_saved_sign_in,
+            name="browser_use_saved_sign_in",
+            description=prompt("tools/browser_use_saved_sign_in"),
+            args_schema=_SignInArgs,
         ),
         StructuredTool.from_function(
             coroutine=browser_stop,

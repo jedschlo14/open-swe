@@ -32,7 +32,14 @@ from PIL import Image
 from pydantic import JsonValue
 
 from agent.browser.models import BrowserSession
-from agent.browser.policy import allowed_domains
+from agent.browser.policy import allowed_domains, endpoint_of
+from agent.browser.sign_ins import (
+    SignInCookie,
+    SignInState,
+    canonical_origin,
+    parse_cookies,
+    parse_local_storage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +91,11 @@ _DISPLAY_INSTALL = (
 _DISPLAY_INSTALL_TIMEOUT_SECONDS = 600
 MAX_TEXT_CHARS = 20_000
 MAX_SELECTION_CHARS = 100_000
+_PASSWORD_FIELD_SCRIPT = "!!document.querySelector('input[type=password]')"
+_STORE_LOCAL_STORAGE_SCRIPT = (
+    "(() => {{ for (const [k, v] of Object.entries(JSON.parse({items}))) "
+    "localStorage.setItem(k, v); }})()"
+)
 
 
 class SandboxLostError(RuntimeError):
@@ -498,3 +510,74 @@ async def close(sandbox: AsyncSandbox, session: BrowserSession) -> None:
         ' do [ -f "$pid" ] && kill $(cat "$pid") 2>/dev/null; done;'
         f" ip netns delete {namespace} 2>/dev/null; rm -rf {directory} {socket}; true"
     )
+
+
+async def current_origin(sandbox: AsyncSandbox, session: BrowserSession) -> str | None:
+    """The canonical origin of the page the browser is on, when it is an external one."""
+    page = await run_command(sandbox, session, ["get", "url"])
+    url = page.get("url")
+    return canonical_origin(url) if isinstance(url, str) else None
+
+
+async def capture_sign_in(
+    sandbox: AsyncSandbox, session: BrowserSession, origin: str
+) -> SignInState:
+    """The current page's cookies for ``origin``'s host and its localStorage."""
+    endpoint = endpoint_of(origin)
+    host = endpoint.host if endpoint is not None else ""
+    cookies = parse_cookies(await run_command(sandbox, session, ["cookies", "get"]), host)
+    storage = parse_local_storage(await run_command(sandbox, session, ["storage", "local"]))
+    return SignInState(cookies=cookies, local_storage=storage)
+
+
+def _cookie_args(cookie: SignInCookie, origin: str) -> list[str]:
+    args = ["cookies", "set", cookie.name, cookie.value, "--path", cookie.path]
+    args += ["--domain", cookie.domain] if cookie.domain.startswith(".") else ["--url", origin]
+    if cookie.http_only:
+        args.append("--httpOnly")
+    if cookie.secure:
+        args.append("--secure")
+    if cookie.same_site is not None:
+        args += ["--sameSite", cookie.same_site]
+    if cookie.expires is not None:
+        args += ["--expires", str(cookie.expires)]
+    return args
+
+
+async def apply_sign_in(
+    sandbox: AsyncSandbox, session: BrowserSession, origin: str, state: SignInState
+) -> bool:
+    """Restore a saved sign-in and report whether the page now looks signed in.
+
+    The browser's allowlist forbids loading saved state, so cookies are set one at
+    a time and localStorage is written once the origin's page has loaded. A
+    failed restore leaves nothing behind.
+    """
+    skipped = 0
+    for cookie in state.cookies:
+        # agent-browser reads a leading dash as a flag, so such values cannot be passed.
+        if cookie.name.startswith("-") or cookie.value.startswith("-"):
+            skipped += 1
+            continue
+        await run_command(sandbox, session, _cookie_args(cookie, origin))
+    if skipped:
+        logger.warning(
+            "Saved sign-in cookies skipped", extra={"browser_session_id": session.session_id}
+        )
+    await run_command(sandbox, session, ["open", origin], timeout=_LAUNCH_TIMEOUT_SECONDS)
+    if state.local_storage:
+        items = json.dumps(json.dumps(state.local_storage))
+        await run_command(
+            sandbox, session, ["eval", _STORE_LOCAL_STORAGE_SCRIPT.format(items=items)]
+        )
+        await run_command(sandbox, session, ["reload"])
+    on_origin = await current_origin(sandbox, session) == origin
+    has_password_field = (
+        await run_command(sandbox, session, ["eval", _PASSWORD_FIELD_SCRIPT])
+    ).get("result")
+    if on_origin and has_password_field is False:
+        return True
+    await run_command(sandbox, session, ["cookies", "clear"])
+    if on_origin:
+        await run_command(sandbox, session, ["eval", "localStorage.clear()"])
+    return False

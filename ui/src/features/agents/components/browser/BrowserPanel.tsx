@@ -4,6 +4,7 @@ import {
   Bot,
   Globe2,
   Hand,
+  KeyRound,
   Play,
   ShieldAlert,
   Square,
@@ -14,7 +15,7 @@ import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
-import { agentsApi } from "@/features/agents/lib/api"
+import { agentsApi, SAVED_SIGN_INS_QUERY_KEY } from "@/features/agents/lib/api"
 import type {
   BrowserFailureReason,
   BrowserPendingConfirmation,
@@ -191,6 +192,17 @@ export function BrowserPanel(props: { threadId: string }) {
         error instanceof Error ? error.message : "The browser request failed."
       ),
   })
+  const saveSignIn = useMutation({
+    mutationFn: () => agentsApi.saveBrowserSignIn(threadId),
+    onSuccess: (saved) => {
+      void queryClient.invalidateQueries({ queryKey: SAVED_SIGN_INS_QUERY_KEY })
+      toast.success(`Saved your sign-in for ${saved.origin}.`)
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Couldn't save the sign-in."
+      ),
+  })
   const decide = useMutation({
     mutationFn: (input: { confirmationId: string; approve: boolean }) =>
       agentsApi.decideBrowserConfirmation(
@@ -288,6 +300,26 @@ export function BrowserPanel(props: { threadId: string }) {
     </Button>
   ) : null
 
+  const signInButton = view.canSaveSignIn ? (
+    <Button
+      className="cursor-pointer"
+      size="sm"
+      variant="outline"
+      title="Keep this page's sign-in so the agent can reuse it in your private threads for 30 days"
+      disabled={saveSignIn.isPending}
+      onClick={() => saveSignIn.mutate()}
+    >
+      {saveSignIn.isPending ? <Spinner /> : <KeyRound />}
+      Save sign-in
+    </Button>
+  ) : null
+  const trailing = (
+    <>
+      {signInButton}
+      {stopButton}
+    </>
+  )
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {view.liveView ? (
@@ -295,11 +327,11 @@ export function BrowserPanel(props: { threadId: string }) {
           page={page}
           enabled={driving}
           send={send}
-          trailing={stopButton}
+          trailing={trailing}
         />
       ) : (
         <div className="flex items-center justify-end border-b border-border px-2 py-1">
-          {stopButton}
+          {trailing}
         </div>
       )}
       {driving ? (
