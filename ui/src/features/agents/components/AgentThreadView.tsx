@@ -719,6 +719,7 @@ export function AgentThreadView({ thread }: AgentThreadViewProps) {
                 fixDisabled={!canPost || sendMessage.isPending}
               />
               <AgentPromptBar
+                draftKey={thread.id}
                 placeholder={
                   canPost
                     ? hasConversation
