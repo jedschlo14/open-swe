@@ -397,8 +397,9 @@ export function BrowserPanel(props: { threadId: string }) {
           <Globe2 className="size-5" />
           <p>The live view isn't available for this browser.</p>
           <p className="max-w-xs text-xs">
-            This sandbox image needs Xvfb and ffmpeg to show the browser. The
-            agent can still use it.
+            Showing the browser needs neko in the sandbox image and a TURN
+            relay (BROWSER_TURN_URLS) configured on the server. The agent can
+            still use it.
           </p>
         </Centered>
       )}
