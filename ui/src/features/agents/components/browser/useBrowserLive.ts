@@ -17,6 +17,51 @@ interface BrowserFrame {
   metadata: { deviceWidth: number; deviceHeight: number }
 }
 
+const BROWSER_CURSORS = [
+  "auto",
+  "default",
+  "none",
+  "context-menu",
+  "help",
+  "pointer",
+  "progress",
+  "wait",
+  "cell",
+  "crosshair",
+  "text",
+  "vertical-text",
+  "alias",
+  "copy",
+  "move",
+  "no-drop",
+  "not-allowed",
+  "grab",
+  "grabbing",
+  "all-scroll",
+  "col-resize",
+  "row-resize",
+  "n-resize",
+  "e-resize",
+  "s-resize",
+  "w-resize",
+  "ne-resize",
+  "nw-resize",
+  "se-resize",
+  "sw-resize",
+  "ew-resize",
+  "ns-resize",
+  "nesw-resize",
+  "nwse-resize",
+  "zoom-in",
+  "zoom-out",
+] as const
+
+export type BrowserCursor = (typeof BROWSER_CURSORS)[number]
+
+function isBrowserCursor(value: string): value is BrowserCursor {
+  return (BROWSER_CURSORS as readonly string[]).includes(value)
+}
+
 export type BrowserInputEvent =
   | {
       type: "input_mouse"
@@ -67,6 +112,24 @@ export function parseBrowserFrame(raw: string): BrowserFrame | null {
   return candidate as BrowserFrame
 }
 
+export function parseBrowserCursor(raw: string): BrowserCursor | null {
+  let message: unknown
+  try {
+    message = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (typeof message !== "object" || message === null) return null
+  const candidate = message as { type?: unknown; cursor?: unknown }
+  if (
+    candidate.type !== "cursor" ||
+    typeof candidate.cursor !== "string" ||
+    !isBrowserCursor(candidate.cursor)
+  )
+    return null
+  return candidate.cursor
+}
+
 async function decodeFrame(data: string): Promise<ImageBitmap> {
   const response = await fetch(`data:image/jpeg;base64,${data}`)
   return createImageBitmap(await response.blob())
@@ -82,6 +145,7 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<BrowserLiveStatus>("idle")
   const [role, setRole] = useState<BrowserLiveConnection["role"] | null>(null)
+  const [cursor, setCursor] = useState<BrowserCursor>("default")
 
   const socketRef = useRef<WebSocket | null>(null)
   const viewportRef = useRef<{ width: number; height: number } | null>(null)
@@ -188,12 +252,19 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
           socket = ws
           socketRef.current = ws
           ws.onopen = () => {
-            if (!disposed) setStatus("live")
+            if (disposed) return
+            setCursor("default")
+            setStatus("live")
           }
           ws.onmessage = (event) => {
             if (disposed || typeof event.data !== "string") return
             const frame = parseBrowserFrame(event.data)
-            if (frame) void draw(frame, ws)
+            if (frame) {
+              void draw(frame, ws)
+              return
+            }
+            const next = parseBrowserCursor(event.data)
+            if (next) setCursor(next)
           }
           ws.onclose = (event) => {
             if (disposed) return
@@ -223,6 +294,7 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
     attachCanvas,
     pointAt,
     sendInput,
+    cursor,
     status: sessionId ? status : "idle",
     role: sessionId ? role : null,
   }

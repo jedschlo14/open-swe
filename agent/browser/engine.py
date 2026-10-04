@@ -52,6 +52,35 @@ _ELEMENT_LABEL_SCRIPT = (
     " return (t.getAttribute('aria-label') || t.innerText || t.value || t.title || '')"
     ".trim().slice(0, 200); }})()"
 )
+_CURSOR_SCRIPT = (
+    "(() => {{ const x = {x}, y = {y}; const e = document.elementFromPoint(x, y);"
+    " if (!e) return 'default';"
+    " const parts = getComputedStyle(e).cursor.split(',');"
+    " const c = parts[parts.length - 1].trim();"
+    " if (c !== 'auto') return c;"
+    " if (e.closest('a[href],area[href]')) return 'pointer';"
+    " if (e.isContentEditable || e.closest('textarea,input:not([type]),"
+    "input[type=text],input[type=search],input[type=url],input[type=email],"
+    "input[type=tel],input[type=password],input[type=number]')) return 'text';"
+    " if (getComputedStyle(e).userSelect === 'none' || !document.caretRangeFromPoint)"
+    " return 'default';"
+    " const r = document.caretRangeFromPoint(x, y);"
+    " if (!r || r.startContainer.nodeType !== 3) return 'default';"
+    " const t = document.createRange(); t.selectNodeContents(r.startContainer);"
+    " for (const b of t.getClientRects())"
+    " if (x >= b.left && x <= b.right && y >= b.top && y <= b.bottom) return 'text';"
+    " return 'default'; }})()"
+)
+CURSORS = frozenset(
+    {
+        "auto", "default", "none", "context-menu", "help", "pointer", "progress", "wait",
+        "cell", "crosshair", "text", "vertical-text", "alias", "copy", "move", "no-drop",
+        "not-allowed", "grab", "grabbing", "all-scroll", "col-resize", "row-resize",
+        "n-resize", "e-resize", "s-resize", "w-resize", "ne-resize", "nw-resize",
+        "se-resize", "sw-resize", "ew-resize", "ns-resize", "nesw-resize", "nwse-resize",
+        "zoom-in", "zoom-out",
+    }
+)  # fmt: skip
 
 
 class SandboxLostError(RuntimeError):
@@ -256,6 +285,13 @@ async def element_label(
     data = await run_command(sandbox, session, ["eval", _ELEMENT_LABEL_SCRIPT.format(x=x, y=y)])
     result = data.get("result")
     return result if isinstance(result, str) else None
+
+
+async def cursor_at(sandbox: AsyncSandbox, session: BrowserSession, x: int, y: int) -> str | None:
+    """The CSS cursor the page shows at a viewport point, which the stream does not carry."""
+    data = await run_command(sandbox, session, ["eval", _CURSOR_SCRIPT.format(x=x, y=y)])
+    result = data.get("result")
+    return result if isinstance(result, str) and result in CURSORS else None
 
 
 def _to_viewport_pixels(image: bytes) -> bytes:

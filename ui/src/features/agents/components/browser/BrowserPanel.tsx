@@ -6,6 +6,7 @@ import type {
 } from "react"
 import {
   Bot,
+  Eye,
   Globe2,
   Hand,
   MousePointer2,
@@ -159,6 +160,7 @@ export function BrowserPanel(props: { threadId: string }) {
     attachCanvas,
     pointAt,
     sendInput,
+    cursor,
     status: liveStatus,
     role,
   } = useBrowserLive(
@@ -264,6 +266,8 @@ export function BrowserPanel(props: { threadId: string }) {
 
   const pending = view.pendingConfirmation
   const driving = view.viewerControls && liveStatus === "live"
+  const watching = liveStatus === "live" && !driving
+  const canTakeOver = canControl && view.controller === "agent"
   const sendMouse = (
     event: ReactMouseEvent<HTMLCanvasElement>,
     eventType: "mousePressed" | "mouseReleased" | "mouseMoved"
@@ -387,7 +391,7 @@ export function BrowserPanel(props: { threadId: string }) {
           }
         />
       ) : null}
-      <div className="relative flex min-h-0 flex-1 items-center justify-center bg-muted/30 p-3">
+      <div className="group relative flex min-h-0 flex-1 items-center justify-center bg-muted/30 p-3">
         <canvas
           ref={attachCanvas}
           aria-label={
@@ -399,9 +403,9 @@ export function BrowserPanel(props: { threadId: string }) {
           className={cn(
             "max-h-full max-w-full rounded-md border border-border bg-background object-contain shadow-sm outline-none",
             liveStatus !== "live" && "opacity-40",
-            driving &&
-              "cursor-default ring-2 ring-primary/60 focus:ring-primary"
+            driving && "ring-2 ring-primary/60 focus:ring-primary"
           )}
+          style={{ cursor: driving ? cursor : "default" }}
           onMouseDown={(event) => {
             if (!driving) return
             event.currentTarget.focus()
@@ -430,6 +434,44 @@ export function BrowserPanel(props: { threadId: string }) {
             if (driving) event.preventDefault()
           }}
         />
+        {watching ? (
+          <>
+            <span className="pointer-events-none absolute top-4 left-4 flex items-center gap-1.5 rounded-full bg-background/80 px-2 py-1 text-[11px] text-muted-foreground shadow-sm ring-1 ring-border backdrop-blur-sm transition-opacity group-focus-within:opacity-0 group-hover:opacity-0">
+              <Eye className="size-3" />
+              Watching
+            </span>
+            <div className="pointer-events-none absolute inset-0 flex cursor-default flex-col items-center justify-center gap-3 bg-black/50 px-6 text-center text-white opacity-0 transition-opacity duration-150 group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
+              <Eye className="size-5" />
+              <div className="space-y-1">
+                <p className="text-sm font-medium">
+                  {canTakeOver
+                    ? "The agent is in control"
+                    : canControl
+                      ? `${view.controllerLogin ?? "A person"} is in control`
+                      : "View only"}
+                </p>
+                <p className="text-xs text-white/70">
+                  {canTakeOver
+                    ? "Take control to click and type in the page."
+                    : canControl
+                      ? "You can watch until they hand it back."
+                      : "You can watch this browser but not control it."}
+                </p>
+              </div>
+              {canTakeOver ? (
+                <Button
+                  className="cursor-pointer"
+                  size="sm"
+                  disabled={action.isPending}
+                  onClick={() => action.mutate("takeover")}
+                >
+                  {action.isPending ? <Spinner /> : <Hand />}
+                  Take control
+                </Button>
+              ) : null}
+            </div>
+          </>
+        ) : null}
         {liveStatus === "connecting" ? (
           <span className="absolute flex items-center gap-2 text-xs text-muted-foreground">
             <Spinner /> Connecting to the live view…

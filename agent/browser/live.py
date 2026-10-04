@@ -5,7 +5,9 @@ copies frames to the viewer, so neither the provider URL nor DevTools ever
 reaches the client. Access is checked on connect and rechecked while the view
 is open; the connection closes when the viewer loses access or the session it
 was opened for ends. Input passes only for a viewer who holds the lease, checked
-again for every press, release, and key (thread access at most once a second).
+again for every press, release, and key (thread access at most once a second). The
+controller also receives the page's cursor, looked up under their pointer, so hovering a
+link looks like hovering a link.
 """
 
 import asyncio
@@ -16,11 +18,12 @@ from collections.abc import Awaitable, Callable
 
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
+from langsmith.sandbox import AsyncSandbox
 from pydantic import JsonValue
 from websockets.asyncio.client import ClientConnection
 from websockets.typing import Origin
 
-from agent.browser import manager, store
+from agent.browser import engine, manager, store
 from agent.browser.models import BrowserSession
 from agent.dashboard.oauth import BrowserTicket, BrowserTicketRole
 
@@ -41,6 +44,8 @@ _MOVE_CHECK_SECONDS = 2.0
 _ACTIVITY_EVERY_SECONDS = 30.0
 # Thread access is fetched from another service; the lease is read for every action regardless.
 _ACCESS_CHECK_SECONDS = 1.0
+# Each cursor lookup is a command in the sandbox, so lookups run one at a time with a rest between.
+_CURSOR_PROBE_REST_SECONDS = 0.02
 
 type Authorizer = Callable[[], Awaitable[BrowserTicketRole | None]]
 
@@ -155,8 +160,53 @@ class _ControlGate:
         return self._allowed
 
 
+class _CursorProbe:
+    """Tells the controller which cursor the page shows under their pointer.
+
+    DevTools has no cursor event and the stream carries only pixels, so the
+    page is asked at the pointer's latest position, newest position first.
+    """
+
+    def __init__(
+        self, sandbox: AsyncSandbox, session: BrowserSession, websocket: WebSocket
+    ) -> None:
+        self._sandbox = sandbox
+        self._session = session
+        self._websocket = websocket
+        self._target: tuple[int, int] | None = None
+        self._wake = asyncio.Event()
+
+    def move(self, x: float, y: float) -> None:
+        self._target = (round(x), round(y))
+        self._wake.set()
+
+    async def run(self) -> None:
+        sent: str | None = None
+        while True:
+            await self._wake.wait()
+            self._wake.clear()
+            if self._target is None:
+                continue
+            try:
+                cursor = await engine.cursor_at(self._sandbox, self._session, *self._target)
+            except Exception:
+                logger.debug(
+                    "Browser cursor lookup failed",
+                    exc_info=True,
+                    extra={"browser_session_id": self._session.session_id},
+                )
+                cursor = None
+            if cursor is not None and cursor != sent:
+                sent = cursor
+                await self._websocket.send_text(json.dumps({"type": "cursor", "cursor": cursor}))
+            await asyncio.sleep(_CURSOR_PROBE_REST_SECONDS)
+
+
 async def _upstream(
-    websocket: WebSocket, upstream: ClientConnection, gate: _ControlGate | None
+    websocket: WebSocket,
+    upstream: ClientConnection,
+    gate: _ControlGate | None,
+    probe: _CursorProbe | None,
 ) -> None:
     while True:
         raw = await websocket.receive_text()
@@ -169,6 +219,9 @@ async def _upstream(
         event = _input_message(raw)
         if event is not None and await gate.allows(event[1]):
             await upstream.send(json.dumps(event[0]))
+            x, y = event[0].get("x"), event[0].get("y")
+            if probe is not None and isinstance(x, float) and isinstance(y, float):
+                probe.move(x, y)
 
 
 async def _watch(session: BrowserSession, authorize: Authorizer, websocket: WebSocket) -> None:
@@ -211,11 +264,14 @@ async def relay(
                     "Browser live view opened",
                     extra={"browser_session_id": session.session_id, "browser_role": ticket.role},
                 )
+                probe = _CursorProbe(sandbox, session, websocket) if gate is not None else None
                 tasks = {
                     asyncio.create_task(_downstream(upstream, websocket)),
-                    asyncio.create_task(_upstream(websocket, upstream, gate)),
+                    asyncio.create_task(_upstream(websocket, upstream, gate, probe)),
                     asyncio.create_task(_watch(session, authorize, websocket)),
                 }
+                if probe is not None:
+                    tasks.add(asyncio.create_task(probe.run()))
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for task in pending:
                     task.cancel()
