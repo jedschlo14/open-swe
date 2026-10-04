@@ -10,7 +10,9 @@ Every call goes through ``sandbox.run`` with the server's own credentials; the
 browser's DevTools and stream ports stay on the namespace's loopback.
 """
 
+import asyncio
 import base64
+import io
 import json
 import logging
 import re
@@ -21,6 +23,7 @@ from functools import cache
 from importlib import resources
 
 from langsmith.sandbox import AsyncSandbox, ResourceNotFoundError
+from PIL import Image
 from pydantic import JsonValue
 
 from agent.browser.models import BrowserSession
@@ -35,6 +38,11 @@ PROXY_PORT = 3128
 MAX_OUTPUT_CHARS = 40_000
 # The daemon's own idle shutdown is a backstop for a server that never sweeps.
 DAEMON_IDLE_GRACE_MS = 10 * 60 * 1000
+VIEWPORT_WIDTH = 1440
+VIEWPORT_HEIGHT = 900
+# Rendered at twice the viewport so the live view stays sharp on high-density (4K) displays.
+DEVICE_SCALE_FACTOR = 2
+_SCREENSHOT_QUALITY = 70
 _LAUNCH_TIMEOUT_SECONDS = 120
 _COMMAND_TIMEOUT_SECONDS = 60
 _ELEMENT_LABEL_SCRIPT = (
@@ -96,8 +104,10 @@ def _env(session: BrowserSession) -> dict[str, str]:
         "AGENT_BROWSER_PROXY_BYPASS": "<-loopback>",
         "AGENT_BROWSER_ALLOWED_DOMAINS": allowed_domains(session.approved_endpoints),
         "AGENT_BROWSER_MAX_OUTPUT": str(MAX_OUTPUT_CHARS),
-        "AGENT_BROWSER_STREAM_QUALITY": "60",
-        "AGENT_BROWSER_STREAM_MAX_WIDTH": "1280",
+        "AGENT_BROWSER_STREAM_QUALITY": "80",
+        # Both caps must be set, or the stream downscales frames to the viewport's CSS size.
+        "AGENT_BROWSER_STREAM_MAX_WIDTH": str(VIEWPORT_WIDTH * DEVICE_SCALE_FACTOR),
+        "AGENT_BROWSER_STREAM_MAX_HEIGHT": str(VIEWPORT_HEIGHT * DEVICE_SCALE_FACTOR),
     }
 
 
@@ -218,6 +228,13 @@ async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int:
     await check_engine(sandbox)
     await _isolate(sandbox, session)
     await run_command(sandbox, session, ["get", "url"], timeout=_LAUNCH_TIMEOUT_SECONDS)
+    # Without an explicit viewport the page is shorter than the size the stream reports,
+    # so frames are stretched and live-view clicks land below the pointer.
+    await run_command(
+        sandbox,
+        session,
+        ["set", "viewport", str(VIEWPORT_WIDTH), str(VIEWPORT_HEIGHT), str(DEVICE_SCALE_FACTOR)],
+    )
     port = _stream_port(await run_command(sandbox, session, ["stream", "status"]))
     if port is None:
         port = _stream_port(await run_command(sandbox, session, ["stream", "enable"]))
@@ -239,16 +256,39 @@ async def element_label(
     return result if isinstance(result, str) else None
 
 
+def _to_viewport_pixels(image: bytes) -> bytes:
+    """Scale a device-pixel JPEG capture down to viewport pixels, the space clicks use."""
+    with Image.open(io.BytesIO(image)) as source:
+        size = (
+            max(round(source.width / DEVICE_SCALE_FACTOR), 1),
+            max(round(source.height / DEVICE_SCALE_FACTOR), 1),
+        )
+        if size == source.size:
+            return image
+        scaled = source.convert("RGB").resize(size, Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    scaled.save(output, "JPEG", quality=_SCREENSHOT_QUALITY)
+    return output.getvalue()
+
+
 async def screenshot(sandbox: AsyncSandbox, session: BrowserSession) -> str:
     """Capture the viewport as JPEG, delete the file, and return it base64-encoded."""
     path = f"{session_dir(session)}/capture.jpg"
     await run_command(
         sandbox,
         session,
-        ["screenshot", "--screenshot-format", "jpeg", "--screenshot-quality", "70", path],
+        [
+            "screenshot",
+            "--screenshot-format",
+            "jpeg",
+            "--screenshot-quality",
+            str(_SCREENSHOT_QUALITY),
+            path,
+        ],
     )
     try:
-        return base64.b64encode(await sandbox.read(path)).decode()
+        image = await asyncio.to_thread(_to_viewport_pixels, await sandbox.read(path))
+        return base64.b64encode(image).decode()
     finally:
         await sandbox.run(f"rm -f {shlex.quote(path)}")
 

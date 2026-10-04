@@ -71,11 +71,11 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
       try {
         if (canvas) {
           const bitmap = await decodeFrame(frame.data)
-          canvas.width = frame.metadata.deviceWidth
-          canvas.height = frame.metadata.deviceHeight
-          canvas
-            .getContext("2d")
-            ?.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+          // Frames arrive at device pixels, above the viewport's CSS size, so the
+          // canvas keeps them at full resolution and CSS scales it to the panel.
+          if (canvas.width !== bitmap.width) canvas.width = bitmap.width
+          if (canvas.height !== bitmap.height) canvas.height = bitmap.height
+          canvas.getContext("2d")?.drawImage(bitmap, 0, 0)
           bitmap.close()
         }
       } finally {
