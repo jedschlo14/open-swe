@@ -63,21 +63,6 @@ function modifierBits(event: {
   )
 }
 
-/** Maps a pointer position on the scaled canvas to the browser's viewport pixels. */
-function viewportPoint(
-  canvas: HTMLCanvasElement,
-  clientX: number,
-  clientY: number
-): { x: number; y: number } {
-  const rect = canvas.getBoundingClientRect()
-  const x = ((clientX - rect.left) * canvas.width) / Math.max(rect.width, 1)
-  const y = ((clientY - rect.top) * canvas.height) / Math.max(rect.height, 1)
-  return {
-    x: Math.round(Math.min(Math.max(x, 0), canvas.width)),
-    y: Math.round(Math.min(Math.max(y, 0), canvas.height)),
-  }
-}
-
 export function browserQueryKey(threadId: string) {
   return ["browser", threadId] as const
 }
@@ -162,6 +147,7 @@ export function BrowserPanel(props: { threadId: string }) {
   })
   const {
     attachCanvas,
+    pointAt,
     sendInput,
     status: liveStatus,
     role,
@@ -272,11 +258,8 @@ export function BrowserPanel(props: { threadId: string }) {
     eventType: "mousePressed" | "mouseReleased" | "mouseMoved"
   ) => {
     if (!driving) return
-    const point = viewportPoint(
-      event.currentTarget,
-      event.clientX,
-      event.clientY
-    )
+    const point = pointAt(event.clientX, event.clientY)
+    if (!point) return
     sendInput({
       type: "input_mouse",
       eventType,
@@ -405,11 +388,8 @@ export function BrowserPanel(props: { threadId: string }) {
           onMouseMove={(event) => sendMouse(event, "mouseMoved")}
           onWheel={(event) => {
             if (!driving) return
-            const point = viewportPoint(
-              event.currentTarget,
-              event.clientX,
-              event.clientY
-            )
+            const point = pointAt(event.clientX, event.clientY)
+            if (!point) return
             sendInput({
               type: "input_mouse",
               eventType: "mouseWheel",
