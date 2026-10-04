@@ -110,7 +110,7 @@ async def bind_sandbox(session_id: str, sandbox_id: str) -> BrowserSession | Non
     )
 
 
-async def mark_ready(session_id: str, *, stream_port: int) -> BrowserSession | None:
+async def mark_ready(session_id: str, *, stream_port: int | None) -> BrowserSession | None:
     return await _one(
         f"""
         UPDATE browser_session
