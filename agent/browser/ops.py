@@ -96,6 +96,14 @@ class ScreenshotOp(_Op):
     format: Literal["jpeg", "png"] = "jpeg"
 
 
+class RecordStartOp(_Op):
+    action: Literal["record_start"] = "record_start"
+
+
+class RecordStopOp(_Op):
+    action: Literal["record_stop"] = "record_stop"
+
+
 ActOp = Annotated[
     ClickOp | FillOp | SelectOp | PressOp | ScrollOp | WaitOp | BackOp | ReloadOp | DialogOp,
     Field(discriminator="action"),
@@ -112,7 +120,9 @@ BrowserOp = Annotated[
     | BackOp
     | ReloadOp
     | DialogOp
-    | ScreenshotOp,
+    | ScreenshotOp
+    | RecordStartOp
+    | RecordStopOp,
     Field(discriminator="action"),
 ]
 
@@ -156,7 +166,7 @@ def _argv(op: BrowserOp) -> list[str]:
             return ["dialog", "accept"]
         case DialogOp():
             return ["dialog", "dismiss"]
-        case ScreenshotOp():
-            raise ValueError("screenshots are captured by the engine, not a single command")
+        case ScreenshotOp() | RecordStartOp() | RecordStopOp():
+            raise ValueError(f"{op.action} is run by the engine, not a single command")
         case _:
             raise ValueError("click needs a ref or coordinates")

@@ -15,7 +15,16 @@ from pydantic import BaseModel, JsonValue
 
 from agent.browser import engine, manager, policy, sign_ins, store
 from agent.browser.models import BrowserSession, HandbackNotice, PageRef
-from agent.browser.ops import BrowserOp, ClickOp, NavigateOp, ScreenshotOp, SnapshotOp, commands
+from agent.browser.ops import (
+    BrowserOp,
+    ClickOp,
+    NavigateOp,
+    RecordStartOp,
+    RecordStopOp,
+    ScreenshotOp,
+    SnapshotOp,
+    commands,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +179,7 @@ async def _still_held(session: BrowserSession) -> bool:
 async def _decide(sandbox: AsyncSandbox, session: BrowserSession, op: BrowserOp) -> policy.Decision:
     if isinstance(op, NavigateOp):
         return policy.navigation(op, session.approved_endpoints)
-    if isinstance(op, SnapshotOp | ScreenshotOp):
+    if isinstance(op, SnapshotOp | ScreenshotOp | RecordStartOp | RecordStopOp):
         return policy.Allow()
     label = None
     if isinstance(op, ClickOp) and op.x is not None and op.y is not None:
@@ -229,11 +238,44 @@ async def _execute(
             image_base64=base64.b64encode(image).decode(),
             image_mime_type="image/png" if op.format == "png" else "image/jpeg",
         )
+    if isinstance(op, RecordStartOp):
+        await engine.start_recording(sandbox, session)
+        return BrowserOutcome(
+            status="ok",
+            message=(
+                f"Recording. It keeps the first {engine.MAX_RECORDING_SECONDS} seconds and "
+                "is discarded if a person takes control. Stop it with browser_record_stop."
+            ),
+        )
+    if isinstance(op, RecordStopOp):
+        sheet = await engine.stop_recording(sandbox, session)
+        if sheet is None:
+            return BrowserOutcome(
+                status="error",
+                message=(
+                    "No recording is in progress. One is discarded when a person takes "
+                    "control of the browser."
+                ),
+            )
+        return BrowserOutcome(
+            status="ok",
+            message=(
+                f"Recorded {sheet.seconds:.0f} seconds; the image is one frame per second. "
+                "Check it, then publish with browser_publish_recording."
+            ),
+            image_base64=base64.b64encode(sheet.image).decode(),
+            image_mime_type="image/jpeg",
+        )
+    recording = await engine.recording_active(sandbox, session)
+    if recording:
+        await engine.keep_recording_mask(sandbox, session)
     data: dict[str, JsonValue] = {}
     for index, args in enumerate(commands(op)):
         if index and not await _still_held(session):
             raise _Superseded
         data = await engine.run_command(sandbox, session, args)
+    if recording:
+        await engine.keep_recording_mask(sandbox, session)
     if isinstance(op, SnapshotOp):
         await store.record_refs(session.session_id, _refs(data))
         return BrowserOutcome(
@@ -242,6 +284,31 @@ async def _execute(
     if isinstance(op, NavigateOp):
         return BrowserOutcome(status="ok", url=_text(data, "url"), title=_text(data, "title"))
     return BrowserOutcome(status="ok")
+
+
+class RecordingExport(BaseModel):
+    """A finished recording encoded for publishing."""
+
+    data: bytes
+    recording_format: engine.RecordingFormat
+
+
+async def export_recording(
+    thread_id: str, recording_format: engine.RecordingFormat
+) -> tuple[BrowserOutcome, RecordingExport | None]:
+    """Encode the thread's finished recording as ``recording_format``."""
+    found = await manager.current(thread_id)
+    if found is None or not found.active:
+        return BrowserOutcome(status="no_session", message="No browser is open."), None
+    exported: list[RecordingExport] = []
+
+    async def run(sandbox: AsyncSandbox, session: BrowserSession) -> BrowserOutcome:
+        data = await engine.export_recording(sandbox, session, recording_format)
+        exported.append(RecordingExport(data=data, recording_format=recording_format))
+        return BrowserOutcome(status="ok")
+
+    outcome = await _as_agent(thread_id, found, run)
+    return outcome, exported[0] if exported and outcome.status == "ok" else None
 
 
 async def restore_sign_in(
