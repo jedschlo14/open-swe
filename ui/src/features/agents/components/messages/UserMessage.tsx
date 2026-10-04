@@ -68,7 +68,7 @@ export function UserMessage({ message }: { message: Message }) {
           (message.structuredSenderName ||
             isSlack ||
             message.structuredSenderIsBot) && (
-            <div className="mb-1 flex items-center gap-1 px-1 text-[11px] font-medium text-muted-foreground">
+            <div className="mb-1 flex items-center justify-end gap-1 px-1 text-[11px] font-medium text-muted-foreground">
               {isSlack && (
                 <IoLogoSlack className="size-3" role="img" aria-label="Slack" />
               )}
@@ -95,7 +95,9 @@ export function UserMessage({ message }: { message: Message }) {
         {(!isSystem || expanded) && (text || images.length > 0) && (
           <div
             className={`relative overflow-hidden rounded-2xl p-3 ${
-              isSystem ? "mt-1 border border-border bg-muted/50" : "bg-accent"
+              isSystem
+                ? "mt-1 border border-border bg-muted/50"
+                : "ml-auto w-fit max-w-full bg-accent"
             }`}
           >
             {images.length > 0 && (
