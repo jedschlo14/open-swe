@@ -18,6 +18,14 @@ class _Message(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True)
 
 
+class Anchor(_Message):
+    """The page element a press landed on and where inside it, so the browser can find it again."""
+
+    id: Annotated[int, Field(ge=0, le=2**31)]
+    fx: Annotated[float, Field(ge=-1, le=2)]
+    fy: Annotated[float, Field(ge=-1, le=2)]
+
+
 class MouseMessage(_Message):
     type: Literal["mouse"]
     action: Literal["move", "down", "up", "wheel"]
@@ -26,6 +34,7 @@ class MouseMessage(_Message):
     button: Annotated[int, Field(ge=0, le=2)] = 0
     dx: _DELTA = 0
     dy: _DELTA = 0
+    anchor: Anchor | None = None
 
     @property
     def discrete(self) -> bool:
@@ -37,6 +46,12 @@ class KeyMessage(_Message):
     action: Literal["down", "up"]
     key: Annotated[str, Field(max_length=32)]
     code: Annotated[str, Field(max_length=32)]
+
+
+class ChoiceMessage(_Message):
+    type: Literal["choice"]
+    id: Annotated[int, Field(ge=0, le=2**31)]
+    value: Annotated[str, Field(max_length=1024)]
 
 
 class ResizeMessage(_Message):
@@ -65,7 +80,13 @@ class PasteMessage(_Message):
 
 
 ClientMessage = (
-    MouseMessage | KeyMessage | ResizeMessage | NavigateMessage | CopyMessage | PasteMessage
+    MouseMessage
+    | KeyMessage
+    | ChoiceMessage
+    | ResizeMessage
+    | NavigateMessage
+    | CopyMessage
+    | PasteMessage
 )
 _ADAPTER: TypeAdapter[ClientMessage] = TypeAdapter(
     Annotated[ClientMessage, Field(discriminator="type")]
