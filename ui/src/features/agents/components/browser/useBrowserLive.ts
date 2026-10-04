@@ -1,7 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { toast } from "sonner"
 
 import { agentsApi } from "@/features/agents/lib/api"
+import {
+  BrowserVideoPlayer,
+  canPlayLiveView,
+} from "@/features/agents/components/browser/browserVideo"
+import type { ViewportSize } from "@/features/agents/components/browser/browserViewport"
 import type { BrowserLiveConnection } from "@/features/agents/lib/api"
+import {
+  cursorStyle,
+  isRecord,
+  parseGeometry,
+  parsePage,
+  type BrowserGeometry,
+  type BrowserLiveRecord,
+  type BrowserPage,
+} from "@/features/agents/components/browser/browserMessages"
 
 export type BrowserLiveStatus =
   | "idle"
@@ -9,98 +24,152 @@ export type BrowserLiveStatus =
   | "live"
   | "ended"
   | "error"
+  | "unsupported"
 
-interface BrowserFrame {
-  type: "frame"
-  seq: number
-  data: string
-  metadata: { deviceWidth: number; deviceHeight: number }
-}
+export type BrowserClientMessage =
+  | {
+      type: "mouse"
+      action: "move" | "down" | "up" | "wheel"
+      x: number
+      y: number
+      button?: number
+      dx?: number
+      dy?: number
+    }
+  | { type: "key"; action: "down" | "up"; key: string; code: string }
+  | { type: "resize"; width: number; height: number }
+  | {
+      type: "navigate"
+      action: "back" | "forward" | "reload" | "go"
+      url?: string
+    }
+  | { type: "copy" }
+  | { type: "paste"; text: string }
 
 const RETRY_DELAY_MS = 3_000
+const RESIZE_DEBOUNCE_MS = 120
+const HIDDEN_DISCONNECT_MS = 20_000
 /** Capacity and server-side failures are worth one more try; access changes are not. */
 const RETRYABLE_CLOSE_CODES = new Set([1011, 1013])
 
-export function parseBrowserFrame(raw: string): BrowserFrame | null {
-  let message: unknown
-  try {
-    message = JSON.parse(raw)
-  } catch {
-    return null
-  }
-  if (typeof message !== "object" || message === null) return null
-  const candidate = message as Partial<BrowserFrame>
-  if (
-    candidate.type !== "frame" ||
-    typeof candidate.seq !== "number" ||
-    typeof candidate.data !== "string" ||
-    typeof candidate.metadata?.deviceWidth !== "number" ||
-    typeof candidate.metadata.deviceHeight !== "number"
-  )
-    return null
-  return candidate as BrowserFrame
+function usePageHiddenFor(delayMs: number): boolean {
+  const [suspended, setSuspended] = useState(false)
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const update = () => {
+      if (timer) clearTimeout(timer)
+      timer = null
+      if (document.hidden) {
+        timer = setTimeout(() => setSuspended(true), delayMs)
+      } else {
+        setSuspended(false)
+      }
+    }
+    document.addEventListener("visibilitychange", update)
+    return () => {
+      if (timer) clearTimeout(timer)
+      document.removeEventListener("visibilitychange", update)
+    }
+  }, [delayMs])
+  return suspended
 }
 
-async function decodeFrame(data: string): Promise<ImageBitmap> {
-  const response = await fetch(`data:image/jpeg;base64,${data}`)
-  return createImageBitmap(await response.blob())
+async function writeClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch (error) {
+    console.debug("Couldn't copy the page's selection", error)
+    toast.error("Couldn't copy to your clipboard.")
+  }
 }
 
 /**
- * Streams a thread browser's viewport onto a canvas. Frames use ack pacing:
- * each is acknowledged on arrival so the next one travels while this one is
- * decoded, and a frame still waiting when a newer one lands is dropped, so a
- * slow viewer gets the current page rather than a backlog.
+ * Streams a thread browser onto a canvas as H.264 video and carries the
+ * controller's input back. The server decides who may send input; this hook
+ * only transports it.
  */
-export function useBrowserLive(threadId: string, sessionId: string | null) {
+export function useBrowserLive(
+  threadId: string,
+  sessionId: string | null,
+  panelViewport: ViewportSize | null
+) {
+  const suspended = usePageHiddenFor(HIDDEN_DISCONNECT_MS)
+  const unsupported = !canPlayLiveView()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<BrowserLiveStatus>("idle")
   const [role, setRole] = useState<BrowserLiveConnection["role"] | null>(null)
+  const [cursor, setCursor] = useState("default")
+  const [page, setPage] = useState<BrowserPage | null>(null)
+  const [geometry, setGeometry] = useState<BrowserGeometry | null>(null)
+  const [attempt, setAttempt] = useState(0)
 
+  const socketRef = useRef<WebSocket | null>(null)
+  const geometryRef = useRef<BrowserGeometry | null>(null)
   const attachCanvas = useCallback((node: HTMLCanvasElement | null) => {
     canvasRef.current = node
   }, [])
+  const send = useCallback((message: BrowserClientMessage) => {
+    const socket = socketRef.current
+    if (socket?.readyState === WebSocket.OPEN)
+      socket.send(JSON.stringify(message))
+  }, [])
+
+  const width = panelViewport?.width
+  const height = panelViewport?.height
+  useEffect(() => {
+    if (status !== "live" || role === "view" || !width || !height) return
+    const timer = setTimeout(
+      () => send({ type: "resize", width, height }),
+      RESIZE_DEBOUNCE_MS
+    )
+    return () => clearTimeout(timer)
+  }, [status, role, width, height, send])
 
   useEffect(() => {
-    if (!sessionId) return
+    if (!sessionId || suspended) return
+    if (unsupported) return
     let disposed = false
     let socket: WebSocket | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
-    let drawing = false
-    let waiting: BrowserFrame | null = null
-
-    const paint = async (frame: BrowserFrame) => {
-      const canvas = canvasRef.current
-      if (!canvas) return
-      const bitmap = await decodeFrame(frame.data)
-      // Frames arrive at device pixels, above the viewport's CSS size, so the
-      // canvas keeps them at full resolution and CSS scales it to the panel.
-      if (canvas.width !== bitmap.width) canvas.width = bitmap.width
-      if (canvas.height !== bitmap.height) canvas.height = bitmap.height
-      canvas.getContext("2d")?.drawImage(bitmap, 0, 0)
-      bitmap.close()
-    }
-
-    const draw = async (frame: BrowserFrame, ws: WebSocket) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "ack", seq: frame.seq }))
+    const player = new BrowserVideoPlayer(
+      () => canvasRef.current,
+      (error) => {
+        console.debug("The live view's decoder failed; reconnecting", error)
+        if (!disposed) setAttempt((count) => count + 1)
       }
-      if (drawing) {
-        waiting = frame
-        return
-      }
-      drawing = true
-      let next: BrowserFrame | null = frame
-      while (next && !disposed) {
-        waiting = null
-        try {
-          await paint(next)
-        } catch (error) {
-          console.debug("Skipped a browser frame that failed to decode", error)
+    )
+
+    const handleMessage = (message: BrowserLiveRecord) => {
+      switch (message.type) {
+        case "status": {
+          const next = parseGeometry(message)
+          if (next) {
+            geometryRef.current = next
+            setGeometry(next)
+          }
+          return
         }
-        next = waiting
+        case "cursor": {
+          const scale = geometryRef.current
+            ? geometryRef.current.width / geometryRef.current.cssWidth
+            : 1
+          const next = cursorStyle(message, scale)
+          if (next) setCursor(next)
+          return
+        }
+        case "page": {
+          const next = parsePage(message)
+          if (next) setPage(next)
+          return
+        }
+        case "clipboard":
+          if (typeof message.text === "string")
+            void writeClipboard(message.text)
+          return
+        case "notice":
+          if (typeof message.message === "string") toast.error(message.message)
+          return
       }
-      drawing = false
     }
 
     const connect = () => {
@@ -114,14 +183,27 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
             connection.protocol,
             connection.ticket,
           ])
+          ws.binaryType = "arraybuffer"
           socket = ws
+          socketRef.current = ws
           ws.onopen = () => {
-            if (!disposed) setStatus("live")
+            if (disposed) return
+            setCursor("default")
+            setStatus("live")
           }
           ws.onmessage = (event) => {
-            if (disposed || typeof event.data !== "string") return
-            const frame = parseBrowserFrame(event.data)
-            if (frame) void draw(frame, ws)
+            if (disposed) return
+            if (event.data instanceof ArrayBuffer) {
+              player.push(event.data)
+              return
+            }
+            if (typeof event.data !== "string") return
+            try {
+              const message: unknown = JSON.parse(event.data)
+              if (isRecord(message)) handleMessage(message)
+            } catch (error) {
+              console.debug("Ignored an unreadable live view message", error)
+            }
           }
           ws.onclose = (event) => {
             if (disposed) return
@@ -142,13 +224,19 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
     return () => {
       disposed = true
       if (retry) clearTimeout(retry)
+      socketRef.current = null
       socket?.close()
+      player.dispose()
     }
-  }, [threadId, sessionId])
+  }, [threadId, sessionId, suspended, unsupported, attempt])
 
   return {
     attachCanvas,
-    status: sessionId ? status : "idle",
+    send,
+    cursor,
+    page: sessionId ? page : null,
+    geometry: sessionId ? geometry : null,
+    status: !sessionId ? "idle" : unsupported ? "unsupported" : status,
     role: sessionId ? role : null,
   }
 }

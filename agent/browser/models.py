@@ -13,6 +13,7 @@ FailureReason = Literal[
 ]
 StopReason = Literal["requested", "thread_closed", "idle_timeout", "sandbox_recreated"]
 Controller = Literal["agent", "user"]
+Handoff = Literal["none", "takeover", "handback"]
 
 IDLE_WARNING_LEAD = timedelta(minutes=5)
 
@@ -41,6 +42,14 @@ class PendingConfirmation(BaseModel):
     decided_by: str | None = None
 
 
+class HandbackNotice(BaseModel):
+    """What the agent learns on its next browser action after a person hands control back."""
+
+    returned_by: str
+    url: str | None
+    title: str | None
+
+
 class BrowserSession(BaseModel):
     """One ``browser_session`` row."""
 
@@ -65,6 +74,9 @@ class BrowserSession(BaseModel):
     allowed_endpoints: list[str]
     page_refs: dict[str, PageRef] | None
     pending_confirmation: PendingConfirmation | None
+    handoff: Handoff
+    agent_inflight: int
+    handback_notice: HandbackNotice | None
 
     @property
     def active(self) -> bool:
@@ -78,6 +90,22 @@ class BrowserSession(BaseModel):
     def daemon_session(self) -> str:
         """The ``agent-browser`` session name, unique per session so profiles never mix."""
         return f"osw-{self.session_id}"
+
+    def user_controls(self, login: str | None) -> bool:
+        """Whether ``login`` holds the lease and may drive the page right now."""
+        return (
+            self.state == "ready"
+            and self.controller == "user"
+            and self.handoff == "none"
+            and login is not None
+            and self.controller_login is not None
+            and self.controller_login.lower() == login.lower()
+        )
+
+    @property
+    def live_view(self) -> bool:
+        """Whether the browser runs headed on a virtual display the dashboard can stream."""
+        return self.stream_port is not None
 
     @property
     def network_namespace(self) -> str:
@@ -100,11 +128,20 @@ class BrowserSessionView(BaseModel):
     expiry_warning: bool = False
     supported: bool = True
     controller: Controller | None = None
+    controller_login: str | None = None
+    handoff: Handoff | None = None
+    viewer_controls: bool = False
     pending_confirmation: PendingConfirmation | None = None
+    live_view: bool = False
 
     @classmethod
     def of(
-        cls, session: BrowserSession | None, *, now: datetime, supported: bool
+        cls,
+        session: BrowserSession | None,
+        *,
+        now: datetime,
+        supported: bool,
+        viewer: str | None = None,
     ) -> BrowserSessionView:
         if session is None:
             return cls(state=None, supported=supported)
@@ -120,5 +157,9 @@ class BrowserSessionView(BaseModel):
             expiry_warning=expires_at is not None and now >= expires_at - IDLE_WARNING_LEAD,
             supported=supported,
             controller=session.controller if session.active else None,
+            controller_login=session.controller_login if session.active else None,
+            handoff=session.handoff if session.active else None,
+            viewer_controls=session.user_controls(viewer),
             pending_confirmation=session.pending_confirmation if session.active else None,
+            live_view=session.live_view,
         )

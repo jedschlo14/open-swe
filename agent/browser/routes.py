@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Response, WebSocket
 from pydantic import BaseModel, ConfigDict, JsonValue
 from pydantic.alias_generators import to_camel
 
-from agent.browser import live, manager, store
+from agent.browser import lease, live, manager, store
 from agent.browser.models import BrowserSession, BrowserSessionView
 from agent.dashboard.deps import SESSION_DEP
 from agent.dashboard.oauth import (
@@ -68,9 +68,16 @@ def _workspace(metadata: dict[str, JsonValue]) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _view(session: BrowserSession | None, metadata: dict[str, JsonValue]) -> BrowserSessionView:
+def _view(
+    session: BrowserSession | None,
+    metadata: dict[str, JsonValue],
+    viewer: dict[str, Any] | None = None,
+) -> BrowserSessionView:
     return BrowserSessionView.of(
-        session, now=datetime.now(UTC), supported=manager.browser_supported(metadata)
+        session,
+        now=datetime.now(UTC),
+        supported=manager.browser_supported(metadata),
+        viewer=viewer["sub"] if viewer else None,
     )
 
 
@@ -79,7 +86,7 @@ async def api_browser_status(
     thread_id: str, session: dict[str, Any] = SESSION_DEP
 ) -> BrowserSessionView:
     metadata = await _readable(thread_id, session)
-    return _view(await manager.current(thread_id), metadata)
+    return _view(await manager.current(thread_id), metadata, session)
 
 
 @router.post("/threads/{thread_id}/browser/start")
@@ -93,7 +100,7 @@ async def api_browser_start(
         )
     except manager.BrowserUnsupportedError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return _view(started, metadata)
+    return _view(started, metadata, session)
 
 
 @router.post("/threads/{thread_id}/browser/stop")
@@ -102,7 +109,7 @@ async def api_browser_stop(
 ) -> BrowserSessionView:
     metadata = await _writable(thread_id, session)
     stopped = await manager.stop_session(thread_id, "requested")
-    return _view(stopped or await manager.current(thread_id), metadata)
+    return _view(stopped or await manager.current(thread_id), metadata, session)
 
 
 @router.post("/threads/{thread_id}/browser/keepalive")
@@ -111,7 +118,7 @@ async def api_browser_keepalive(
 ) -> BrowserSessionView:
     metadata = await _writable(thread_id, session)
     kept = await manager.keep_alive(thread_id)
-    return _view(kept or await manager.current(thread_id), metadata)
+    return _view(kept or await manager.current(thread_id), metadata, session)
 
 
 @router.post("/threads/{thread_id}/browser/confirmations/{confirmation_id}")
@@ -131,7 +138,7 @@ async def api_browser_confirm(
     )
     if decided is None:
         raise HTTPException(409, "that action is no longer waiting for confirmation")
-    return _view(decided, metadata)
+    return _view(decided, metadata, session)
 
 
 def _role(metadata: dict[str, JsonValue], login: str, email: str | None) -> BrowserTicketRole:
@@ -157,6 +164,8 @@ async def api_browser_live_connect(
     current = await manager.current(thread_id)
     if current is None or current.state != "ready":
         raise HTTPException(409, "the browser is not running")
+    if not current.live_view:
+        raise HTTPException(409, "this browser has no live view")
     role = _role(metadata, session["sub"], session.get("email"))
     response.headers["Cache-Control"] = "no-store"
     return BrowserLiveConnection(
@@ -206,3 +215,29 @@ async def api_browser_live(websocket: WebSocket, thread_id: str) -> None:
         return
     await websocket.accept(subprotocol=live.SUBPROTOCOL)
     await live.relay(websocket, current, ticket, authorize)
+
+
+@router.post("/threads/{thread_id}/browser/takeover")
+async def api_browser_takeover(
+    thread_id: str, session: dict[str, Any] = SESSION_DEP
+) -> BrowserSessionView:
+    """Take the lease from the agent once its in-flight action settles."""
+    metadata = await _writable(thread_id, session)
+    try:
+        taken = await lease.take_control(thread_id, session["sub"])
+    except lease.LeaseConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _view(taken, metadata, session)
+
+
+@router.post("/threads/{thread_id}/browser/handback")
+async def api_browser_handback(
+    thread_id: str, session: dict[str, Any] = SESSION_DEP
+) -> BrowserSessionView:
+    """Return the lease to the agent; any thread writer may, so control never strands."""
+    metadata = await _writable(thread_id, session)
+    try:
+        returned = await lease.hand_back(thread_id, session["sub"])
+    except lease.LeaseConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _view(returned, metadata, session)

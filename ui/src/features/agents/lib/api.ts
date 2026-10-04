@@ -152,8 +152,21 @@ export interface BrowserSessionView {
   expiryWarning: boolean
   supported: boolean
   controller: "agent" | "user" | null
+  controllerLogin: string | null
+  handoff: "none" | "takeover" | "handback" | null
+  /** Whether the person asking holds the lease and may drive the page. */
+  viewerControls: boolean
   pendingConfirmation: BrowserPendingConfirmation | null
+  /** Whether the browser runs on a display the dashboard can stream. */
+  liveView: boolean
 }
+
+export type BrowserSessionAction =
+  | "start"
+  | "stop"
+  | "keepalive"
+  | "takeover"
+  | "handback"
 
 export interface BrowserLiveConnection {
   url: string
@@ -519,7 +532,7 @@ export const agentsApi = {
     agentsRequest<BrowserSessionView>(
       `/threads/${encodeURIComponent(threadId)}/browser`
     ),
-  browserAction: (threadId: string, action: "start" | "stop" | "keepalive") =>
+  browserAction: (threadId: string, action: BrowserSessionAction) =>
     agentsRequest<BrowserSessionView>(
       `/threads/${encodeURIComponent(threadId)}/browser/${action}`,
       { method: "POST" }
