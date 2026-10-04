@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ReactNode } from "react"
 import {
   Bot,
+  Check,
   Globe2,
   Hand,
   KeyRound,
@@ -32,7 +33,14 @@ import {
   viewportFor,
   type ViewportSize,
 } from "@/features/agents/components/browser/browserViewport"
-import { useBrowserLive } from "@/features/agents/components/browser/useBrowserLive"
+import {
+  pageOrigin,
+  useSignInProgress,
+} from "@/features/agents/components/browser/browserSignIn"
+import {
+  useBrowserLive,
+  type BrowserClientMessage,
+} from "@/features/agents/components/browser/useBrowserLive"
 
 const STATUS_POLL_MS = 5_000
 const TRANSITION_POLL_MS = 750
@@ -180,6 +188,22 @@ export function BrowserPanel(props: { threadId: string }) {
     viewport
   )
   const canControl = role !== "view"
+  const signIn = useSignInProgress(
+    status.data?.viewerControls === true && liveStatus === "live",
+    page
+  )
+  const [savedOrigin, setSavedOrigin] = useState<string | null>(null)
+  const sendTracked = useCallback(
+    (message: BrowserClientMessage) => {
+      if (
+        (message.type === "key" && message.action === "down") ||
+        message.type === "paste"
+      )
+        signIn.noteTyping()
+      send(message)
+    },
+    [send, signIn]
+  )
 
   const update = (view: BrowserSessionView) =>
     queryClient.setQueryData(browserQueryKey(threadId), view)
@@ -196,6 +220,8 @@ export function BrowserPanel(props: { threadId: string }) {
     mutationFn: () => agentsApi.saveBrowserSignIn(threadId),
     onSuccess: (saved) => {
       void queryClient.invalidateQueries({ queryKey: SAVED_SIGN_INS_QUERY_KEY })
+      setSavedOrigin(saved.origin)
+      signIn.reset()
       toast.success(`Saved your sign-in for ${saved.origin}.`)
     },
     onError: (error) =>
@@ -300,19 +326,28 @@ export function BrowserPanel(props: { threadId: string }) {
     </Button>
   ) : null
 
-  const signInButton = view.canSaveSignIn ? (
-    <Button
-      className="cursor-pointer"
-      size="sm"
-      variant="outline"
-      title="Keep this page's sign-in so the agent can reuse it in your private threads for 30 days"
-      disabled={saveSignIn.isPending}
-      onClick={() => saveSignIn.mutate()}
-    >
-      {saveSignIn.isPending ? <Spinner /> : <KeyRound />}
-      Save sign-in
-    </Button>
-  ) : null
+  const currentOrigin = pageOrigin(page?.url)
+  const signInButton =
+    view.canSaveSignIn && signIn.canSave ? (
+      <Button
+        className="cursor-pointer"
+        size="sm"
+        variant="outline"
+        title="You're signed in here. Keep this sign-in so the agent can reuse it in your private threads for 30 days"
+        disabled={saveSignIn.isPending}
+        onClick={() => saveSignIn.mutate()}
+      >
+        {saveSignIn.isPending ? <Spinner /> : <KeyRound />}
+        Save sign-in
+      </Button>
+    ) : view.canSaveSignIn &&
+      currentOrigin !== null &&
+      currentOrigin === savedOrigin ? (
+      <span className="flex items-center gap-1 px-1 text-xs text-muted-foreground">
+        <Check className="size-3.5" />
+        Sign-in saved
+      </span>
+    ) : null
   const trailing = (
     <>
       {signInButton}
@@ -326,7 +361,7 @@ export function BrowserPanel(props: { threadId: string }) {
         <BrowserToolbar
           page={page}
           enabled={driving}
-          send={send}
+          send={sendTracked}
           trailing={trailing}
         />
       ) : (
@@ -412,7 +447,7 @@ export function BrowserPanel(props: { threadId: string }) {
           status={liveStatus}
           owner={owner}
           takingOver={takingOver || action.isPending}
-          send={send}
+          send={sendTracked}
           onTakeOver={() => action.mutate("takeover")}
         >
           {handingOver ? (
