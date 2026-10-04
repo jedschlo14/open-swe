@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 SUBPROTOCOL = "open-swe-browser"
 _SLOTS = asyncio.Semaphore(40)
 _RECHECK_SECONDS = 5.0
-_MAX_FPS = 10
+_MAX_FPS = 30
 _MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 # Console output is page content nobody asked to keep; viewers see the page itself.
 _RELAYED_TYPES = frozenset({"frame", "status", "tabs", "url"})

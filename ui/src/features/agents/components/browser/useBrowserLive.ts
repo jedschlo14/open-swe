@@ -42,14 +42,15 @@ export function parseBrowserFrame(raw: string): BrowserFrame | null {
 }
 
 async function decodeFrame(data: string): Promise<ImageBitmap> {
-  const bytes = Uint8Array.from(atob(data), (char) => char.charCodeAt(0))
-  return createImageBitmap(new Blob([bytes], { type: "image/jpeg" }))
+  const response = await fetch(`data:image/jpeg;base64,${data}`)
+  return createImageBitmap(await response.blob())
 }
 
 /**
  * Streams a thread browser's viewport onto a canvas. Frames use ack pacing:
- * each is acknowledged only after it is drawn, so a slow viewer gets the
- * current page rather than a backlog.
+ * each is acknowledged on arrival so the next one travels while this one is
+ * decoded, and a frame still waiting when a newer one lands is dropped, so a
+ * slow viewer gets the current page rather than a backlog.
  */
 export function useBrowserLive(threadId: string, sessionId: string | null) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -65,25 +66,41 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
     let disposed = false
     let socket: WebSocket | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
+    let drawing = false
+    let waiting: BrowserFrame | null = null
+
+    const paint = async (frame: BrowserFrame) => {
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const bitmap = await decodeFrame(frame.data)
+      // Frames arrive at device pixels, above the viewport's CSS size, so the
+      // canvas keeps them at full resolution and CSS scales it to the panel.
+      if (canvas.width !== bitmap.width) canvas.width = bitmap.width
+      if (canvas.height !== bitmap.height) canvas.height = bitmap.height
+      canvas.getContext("2d")?.drawImage(bitmap, 0, 0)
+      bitmap.close()
+    }
 
     const draw = async (frame: BrowserFrame, ws: WebSocket) => {
-      const canvas = canvasRef.current
-      try {
-        if (canvas) {
-          const bitmap = await decodeFrame(frame.data)
-          // Frames arrive at device pixels, above the viewport's CSS size, so the
-          // canvas keeps them at full resolution and CSS scales it to the panel.
-          if (canvas.width !== bitmap.width) canvas.width = bitmap.width
-          if (canvas.height !== bitmap.height) canvas.height = bitmap.height
-          canvas.getContext("2d")?.drawImage(bitmap, 0, 0)
-          bitmap.close()
-        }
-      } finally {
-        // A frame that failed to decode is still acknowledged, so the next one comes.
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "ack", seq: frame.seq }))
-        }
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ack", seq: frame.seq }))
       }
+      if (drawing) {
+        waiting = frame
+        return
+      }
+      drawing = true
+      let next: BrowserFrame | null = frame
+      while (next && !disposed) {
+        waiting = null
+        try {
+          await paint(next)
+        } catch (error) {
+          console.debug("Skipped a browser frame that failed to decode", error)
+        }
+        next = waiting
+      }
+      drawing = false
     }
 
     const connect = () => {

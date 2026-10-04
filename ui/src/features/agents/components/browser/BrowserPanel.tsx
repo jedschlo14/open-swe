@@ -74,6 +74,7 @@ function ConfirmationCard(props: {
       {pending.status === "pending" && props.canDecide ? (
         <div className="mt-2 flex gap-2">
           <Button
+            className="cursor-pointer"
             size="sm"
             disabled={props.deciding}
             onClick={() => props.onDecide(true)}
@@ -81,6 +82,7 @@ function ConfirmationCard(props: {
             Approve once
           </Button>
           <Button
+            className="cursor-pointer"
             size="sm"
             variant="outline"
             disabled={props.deciding}
@@ -190,6 +192,7 @@ export function BrowserPanel(props: { threadId: string }) {
           to watch it work.
         </p>
         <Button
+          className="cursor-pointer"
           size="sm"
           disabled={action.isPending}
           onClick={() => action.mutate("start")}
@@ -214,6 +217,7 @@ export function BrowserPanel(props: { threadId: string }) {
         <span className="flex-1" />
         {canControl ? (
           <Button
+            className="cursor-pointer"
             size="sm"
             variant="ghost"
             disabled={action.isPending}
@@ -232,6 +236,7 @@ export function BrowserPanel(props: { threadId: string }) {
           </span>
           {canControl ? (
             <Button
+              className="cursor-pointer"
               size="sm"
               variant="outline"
               disabled={action.isPending}
