@@ -7,8 +7,9 @@ network rather than an open one. Every command enters that namespace, so a
 daemon that has to be respawned is respawned inside it too.
 
 Chromium runs headed on a private virtual display (Xvfb) when the sandbox has
-Xvfb and ffmpeg, so the live view can stream real video and native widgets such
-as ``<select>`` popups appear. Otherwise it runs headless and the session simply
+Xvfb and ffmpeg (installed on first use when the sandbox can apt-get them), so
+the live view can stream real video and native widgets such as ``<select>``
+popups appear. Otherwise it runs headless and the session simply
 has no live view; the agent is unaffected.
 
 Every call goes through ``sandbox.run`` with the server's own credentials; the
@@ -73,6 +74,14 @@ _DISPLAY_CHECK = (
     " && ffmpeg -hide_banner -devices 2>/dev/null | grep -q x11grab"
     " && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264"
 )
+_DISPLAY_INSTALL = (
+    "export DEBIAN_FRONTEND=noninteractive;"
+    ' if [ "$(id -u)" -eq 0 ]; then SUDO=; else SUDO="sudo -n"; fi;'
+    " command -v apt-get >/dev/null && $SUDO apt-get update -qq"
+    " && $SUDO apt-get install -y -qq --no-install-recommends"
+    " xvfb ffmpeg python3 libx11-6 libxfixes3 libxtst6"
+)
+_DISPLAY_INSTALL_TIMEOUT_SECONDS = 600
 MAX_TEXT_CHARS = 20_000
 MAX_SELECTION_CHARS = 100_000
 
@@ -279,6 +288,24 @@ async def _display_available(sandbox: AsyncSandbox) -> bool:
     return result.exit_code == 0
 
 
+async def _ensure_display(sandbox: AsyncSandbox) -> bool:
+    """Whether the sandbox can show the browser, installing the display packages if absent."""
+    if await _display_available(sandbox):
+        return True
+    try:
+        installed = await sandbox.run(_DISPLAY_INSTALL, timeout=_DISPLAY_INSTALL_TIMEOUT_SECONDS)
+    except Exception:
+        logger.warning("Installing the browser display packages failed", exc_info=True)
+        return False
+    if installed.exit_code != 0:
+        logger.warning(
+            "Installing the browser display packages failed",
+            extra={"exit_code": installed.exit_code, "stderr": installed.stderr[-500:]},
+        )
+        return False
+    return await _display_available(sandbox)
+
+
 async def _start_display(sandbox: AsyncSandbox, session: BrowserSession) -> None:
     directory = shlex.quote(session_dir(session))
     display = display_name(session)
@@ -319,8 +346,8 @@ async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int | None:
     runs headless and only the agent uses it.
     """
     await check_engine(sandbox)
+    live = await _ensure_display(sandbox)
     await _isolate(sandbox, session)
-    live = await _display_available(sandbox)
     if live:
         await _start_display(sandbox, session)
     await run_command(
