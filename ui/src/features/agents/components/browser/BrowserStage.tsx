@@ -1,14 +1,22 @@
 import { Eye, Hand } from "lucide-react"
 import type { ReactNode } from "react"
-import { useCallback, useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { Spinner } from "@/components/ui/spinner"
 import {
   isMacPlatform,
   planKey,
 } from "@/features/agents/components/browser/browserKeys"
-import type { BrowserGeometry } from "@/features/agents/components/browser/browserMessages"
+import {
+  BrowserSelectMenu,
+  type SelectMenuState,
+} from "@/features/agents/components/browser/BrowserSelectMenu"
 import type {
+  MirrorHit,
+  MirrorViewport,
+} from "@/features/agents/components/browser/mirror/MirrorPlayer"
+import type {
+  BrowserAnchor,
   BrowserClientMessage,
   BrowserLiveStatus,
 } from "@/features/agents/components/browser/useBrowserLive"
@@ -24,10 +32,11 @@ export type StageOwner =
   | { kind: "person"; login: string | null }
 
 interface BrowserStageProps {
-  attachCanvas: (node: HTMLCanvasElement | null) => void
+  attachRoot: (node: HTMLDivElement | null) => void
   containerRef: (node: HTMLDivElement | null) => void
-  geometry: BrowserGeometry | null
-  cursor: string
+  viewport: MirrorViewport | null
+  hit: (x: number, y: number) => MirrorHit | null
+  setDriving: (driving: boolean) => void
   status: BrowserLiveStatus
   owner: StageOwner
   takingOver: boolean
@@ -46,6 +55,31 @@ function ownerChip(owner: StageOwner, takingOver: boolean): string | null {
   return `${owner.login ?? "A person"} is in control`
 }
 
+function anchorOf(hit: MirrorHit | null): BrowserAnchor | undefined {
+  return hit && hit.id >= 0 ? { id: hit.id, fx: hit.fx, fy: hit.fy } : undefined
+}
+
+function selectMenuFor(hit: MirrorHit | null): SelectMenuState | null {
+  const element = hit?.element
+  if (!hit || !element || element.nodeName !== "SELECT") return null
+  const select = element as HTMLSelectElement
+  if (select.multiple || select.size > 1 || select.disabled || hit.id < 0)
+    return null
+  const box = select.getBoundingClientRect()
+  return {
+    id: hit.id,
+    x: box.left,
+    y: box.bottom,
+    width: box.width,
+    options: Array.from(select.options, (option) => ({
+      value: option.value,
+      label: option.label || option.text,
+      selected: option.selected,
+      disabled: option.disabled,
+    })),
+  }
+}
+
 /**
  * The live page, edge to edge at 1:1 CSS pixels. While the viewer drives, a
  * hidden textarea holds focus so keys, paste, and composed text reach the page;
@@ -56,7 +90,9 @@ export function BrowserStage(props: BrowserStageProps) {
   const driving = owner.kind === "you" && status === "live"
   const takeoverReady =
     owner.kind === "agent" && owner.canTakeOver && status === "live"
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const overlayRef = useRef<HTMLDivElement | null>(null)
+  const swallowUp = useRef(false)
+  const [menu, setMenu] = useState<SelectMenuState | null>(null)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const held = useRef(new Map<string, string>())
@@ -64,15 +100,7 @@ export function BrowserStage(props: BrowserStageProps) {
   const frame = useRef(0)
   const mac = useRef(isMacPlatform())
 
-  const { attachCanvas, containerRef } = props
-  const attach = useCallback(
-    (node: HTMLCanvasElement | null) => {
-      canvasRef.current = node
-      attachCanvas(node)
-    },
-    [attachCanvas]
-  )
-
+  const { attachRoot, containerRef, hit, setDriving, viewport } = props
   const attachStage = useCallback(
     (node: HTMLDivElement | null) => {
       stageRef.current = node
@@ -82,7 +110,7 @@ export function BrowserStage(props: BrowserStageProps) {
   )
 
   const point = (event: { clientX: number; clientY: number }) => {
-    const rect = canvasRef.current?.getBoundingClientRect()
+    const rect = overlayRef.current?.getBoundingClientRect()
     if (!rect) return null
     return { x: event.clientX - rect.left, y: event.clientY - rect.top }
   }
@@ -91,8 +119,11 @@ export function BrowserStage(props: BrowserStageProps) {
     frame.current = 0
     const next = move.current
     move.current = null
-    if (next) send({ type: "mouse", action: "move", ...next })
-  }, [send])
+    if (!next) return
+    const overlay = overlayRef.current
+    if (overlay) overlay.style.cursor = hit(next.x, next.y)?.cursor ?? "default"
+    send({ type: "mouse", action: "move", ...next })
+  }, [send, hit])
 
   const releaseKeys = useCallback(() => {
     for (const [code, key] of held.current)
@@ -101,9 +132,10 @@ export function BrowserStage(props: BrowserStageProps) {
   }, [send])
 
   useEffect(() => {
+    setDriving(driving)
     if (driving) inputRef.current?.focus()
     else releaseKeys()
-  }, [driving, releaseKeys])
+  }, [driving, releaseKeys, setDriving])
 
   useEffect(
     () => () => {
@@ -138,7 +170,7 @@ export function BrowserStage(props: BrowserStageProps) {
   }, [driving, send])
 
   const sendButton = (
-    event: React.PointerEvent<HTMLCanvasElement>,
+    event: React.PointerEvent<HTMLDivElement>,
     action: "down" | "up"
   ) => {
     const at = point(event)
@@ -146,7 +178,26 @@ export function BrowserStage(props: BrowserStageProps) {
     if (frame.current) cancelAnimationFrame(frame.current)
     frame.current = 0
     move.current = null
-    send({ type: "mouse", action, ...at, button: event.button })
+    const target = hit(at.x, at.y)
+    if (action === "down" && event.button === 0) {
+      const opened = selectMenuFor(target)
+      if (opened) {
+        swallowUp.current = true
+        setMenu(opened)
+        return
+      }
+    }
+    if (action === "up" && swallowUp.current) {
+      swallowUp.current = false
+      return
+    }
+    send({
+      type: "mouse",
+      action,
+      ...at,
+      button: event.button,
+      anchor: anchorOf(target),
+    })
   }
 
   const onKey = (
@@ -172,32 +223,40 @@ export function BrowserStage(props: BrowserStageProps) {
   }
 
   const chip = ownerChip(owner, props.takingOver)
-  const geometry = props.geometry
   return (
     <div
       ref={attachStage}
       className="group relative min-h-0 flex-1 overflow-hidden bg-muted/40 select-none"
     >
-      <canvas
-        ref={attach}
+      <div
+        ref={attachRoot}
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute top-0 left-0 [&_.replayer-mouse]:hidden [&_.replayer-wrapper]:relative [&_.replayer-wrapper>iframe]:block [&_.replayer-wrapper>iframe]:border-0 [&_.replayer-wrapper>iframe]:bg-white",
+          status !== "live" && "opacity-40"
+        )}
+      />
+      <div
+        ref={overlayRef}
+        role="application"
         aria-label={
           driving
             ? "The thread's browser. You are in control."
             : "Live view of the thread's browser"
         }
         className={cn(
-          "absolute top-0 left-0 touch-none bg-background outline-none",
-          status !== "live" && "opacity-40"
+          "absolute top-0 left-0 touch-none outline-none",
+          !driving && "pointer-events-none"
         )}
         style={{
-          width: geometry ? geometry.cssWidth : "100%",
-          height: geometry ? geometry.cssHeight : "100%",
-          cursor: driving ? props.cursor : "default",
+          width: viewport ? viewport.width : "100%",
+          height: viewport ? viewport.height : "100%",
         }}
         onPointerDown={(event) => {
           if (!driving) return
           event.preventDefault()
           event.currentTarget.setPointerCapture(event.pointerId)
+          setMenu(null)
           inputRef.current?.focus()
           sendButton(event, "down")
         }}
@@ -218,6 +277,16 @@ export function BrowserStage(props: BrowserStageProps) {
           if (driving) event.preventDefault()
         }}
       />
+      {menu && driving ? (
+        <BrowserSelectMenu
+          menu={menu}
+          onClose={() => {
+            setMenu(null)
+            inputRef.current?.focus()
+          }}
+          onPick={(value) => send({ type: "choice", id: menu.id, value })}
+        />
+      ) : null}
       <textarea
         ref={inputRef}
         aria-label="Keyboard input for the thread's browser"
@@ -290,12 +359,6 @@ export function BrowserStage(props: BrowserStageProps) {
       {status === "error" ? (
         <span className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
           The live view disconnected.
-        </span>
-      ) : null}
-      {status === "unsupported" ? (
-        <span className="absolute inset-0 flex items-center justify-center px-6 text-center text-xs text-muted-foreground">
-          This browser can't play the live view. Use a current Chrome, Edge,
-          Safari, or Firefox.
         </span>
       ) : null}
       {props.children}
