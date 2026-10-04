@@ -211,6 +211,23 @@ def test_a_view_only_viewer_cannot_send_input_to_the_browser() -> None:
     assert live._viewer_message(json.dumps({"type": "ack", "seq": 7})) == {"type": "ack", "seq": 7}
 
 
+async def test_a_viewer_resizes_the_page_only_while_nobody_else_holds_it(
+    sandbox: Sandbox,
+) -> None:
+    await broker.execute(THREAD, NavigateOp(url="http://localhost:3000/"), workspace_slug=None)
+    session = await store.active(THREAD)
+    assert session is not None
+    alice = live._ControlGate(session, "alice", AsyncMock(return_value="control"))
+
+    assert await alice.allows_resize()
+    await lease.take_control(THREAD, "bob")
+    assert not await alice.allows_resize()
+    assert live._resize_message(json.dumps({"type": "resize", "width": 100, "height": 9000})) == (
+        engine.MIN_VIEWPORT[0],
+        engine.MAX_VIEWPORT[1],
+    )
+
+
 async def test_a_takeover_fences_out_the_agent_until_the_person_hands_back(
     sandbox: Sandbox,
 ) -> None:

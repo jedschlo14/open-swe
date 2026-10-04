@@ -43,6 +43,9 @@ _MOVE_CHECK_SECONDS = 2.0
 _ACTIVITY_EVERY_SECONDS = 30.0
 # Each cursor lookup is a command in the sandbox, so lookups run one at a time with a rest between.
 _CURSOR_PROBE_REST_SECONDS = 0.1
+# A resize is a sandbox command and reflows the page, so they run one at a time with a rest between.
+_VIEWPORT_REST_SECONDS = 0.3
+_VIEWPORT_RETRY_SECONDS = 3.0
 
 type Authorizer = Callable[[], Awaitable[BrowserTicketRole | None]]
 
@@ -65,6 +68,21 @@ def _viewer_message(raw: str) -> dict[str, JsonValue] | None:
         if isinstance(fps, int) and not isinstance(fps, bool) and 1 <= fps <= _MAX_FPS:
             return {"type": "config", "maxFps": fps}
     return None
+
+
+def _resize_message(raw: str) -> tuple[int, int] | None:
+    """The size a controller's panel asks the page to take, limited to what the browser supports."""
+    try:
+        message = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(message, dict) or message.get("type") != "resize":
+        return None
+    width, height = message.get("width"), message.get("height")
+    for value in (width, height):
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 20_000:
+            return None
+    return engine.clamp_viewport(width, height)
 
 
 async def _downstream(upstream: ClientConnection, websocket: WebSocket) -> None:
@@ -151,6 +169,66 @@ class _ControlGate:
             await store.touch(self._session.session_id)
         return self._allowed
 
+    async def allows_resize(self) -> bool:
+        """Whether this viewer may resize the page: they hold it, or the agent is between actions."""
+        current = await store.latest(self._session.thread_id)
+        if current is None or current.session_id != self._session.session_id:
+            return False
+        agent_idle = (
+            current.state == "ready"
+            and current.controller == "agent"
+            and current.handoff == "none"
+            and current.agent_inflight == 0
+        )
+        return (current.user_controls(self._login) or agent_idle) and (
+            await self._authorize() == "control"
+        )
+
+
+class _ViewportSync:
+    """Applies a controller's latest panel size to the page.
+
+    A size that is refused, because someone else holds the page or the agent is
+    mid-action, stays pending and is retried, so it lands once the page is free.
+    """
+
+    def __init__(self, sandbox: AsyncSandbox, session: BrowserSession, gate: _ControlGate) -> None:
+        self._sandbox = sandbox
+        self._session = session
+        self._gate = gate
+        self._target: tuple[int, int] | None = None
+        self._wake = asyncio.Event()
+
+    def request(self, size: tuple[int, int]) -> None:
+        self._target = size
+        self._wake.set()
+
+    async def run(self) -> None:
+        while True:
+            if self._target is None:
+                await self._wake.wait()
+                self._wake.clear()
+                continue
+            target = self._target
+            if not await self._gate.allows_resize():
+                try:
+                    await asyncio.wait_for(self._wake.wait(), _VIEWPORT_RETRY_SECONDS)
+                except TimeoutError:
+                    continue
+                self._wake.clear()
+                continue
+            if self._target == target:
+                self._target = None
+            try:
+                await engine.set_viewport(self._sandbox, self._session, *target)
+            except engine.EngineCommandError:
+                logger.warning(
+                    "Browser resize failed",
+                    exc_info=True,
+                    extra={"browser_session_id": self._session.session_id},
+                )
+            await asyncio.sleep(_VIEWPORT_REST_SECONDS)
+
 
 class _CursorProbe:
     """Tells the controller which cursor the page shows under their pointer.
@@ -199,6 +277,7 @@ async def _upstream(
     upstream: ClientConnection,
     gate: _ControlGate | None,
     probe: _CursorProbe | None,
+    viewport: _ViewportSync | None,
 ) -> None:
     while True:
         raw = await websocket.receive_text()
@@ -207,6 +286,11 @@ async def _upstream(
             await upstream.send(json.dumps(message))
             continue
         if gate is None:
+            continue
+        size = _resize_message(raw)
+        if size is not None:
+            if viewport is not None:
+                viewport.request(size)
             continue
         event = _input_message(raw)
         if event is not None and await gate.allows(event[1]):
@@ -257,13 +341,16 @@ async def relay(
                     extra={"browser_session_id": session.session_id, "browser_role": ticket.role},
                 )
                 probe = _CursorProbe(sandbox, session, websocket) if gate is not None else None
+                viewport = _ViewportSync(sandbox, session, gate) if gate is not None else None
                 tasks = {
                     asyncio.create_task(_downstream(upstream, websocket)),
-                    asyncio.create_task(_upstream(websocket, upstream, gate, probe)),
+                    asyncio.create_task(_upstream(websocket, upstream, gate, probe, viewport)),
                     asyncio.create_task(_watch(session, authorize, websocket)),
                 }
                 if probe is not None:
                     tasks.add(asyncio.create_task(probe.run()))
+                if viewport is not None:
+                    tasks.add(asyncio.create_task(viewport.run()))
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for task in pending:
                     task.cancel()

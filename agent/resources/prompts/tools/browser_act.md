@@ -2,7 +2,7 @@ Perform one action on the page in this thread's browser.
 
 `operation.action` is one of:
 
-- `click`: a `ref` from the latest snapshot, or `x` and `y` viewport coordinates for elements the snapshot cannot name (canvas, custom widgets).
+- `click`: a `ref` from the latest snapshot, or `x` and `y` viewport coordinates for elements the snapshot cannot name (canvas, custom widgets). The viewport follows the size of the person's panel and can change between calls, so take a fresh screenshot before clicking by coordinates.
 - `fill`: replace the text in the `ref` field with `text`.
 - `select`: choose `values` in the `ref` dropdown.
 - `press`: a key such as `Enter`, `Tab`, or `Escape`.

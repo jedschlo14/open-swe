@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import { agentsApi } from "@/features/agents/lib/api"
+import type { ViewportSize } from "@/features/agents/components/browser/browserViewport"
 import type { BrowserLiveConnection } from "@/features/agents/lib/api"
 
 export type BrowserLiveStatus =
@@ -83,14 +84,35 @@ export type BrowserInputEvent =
       modifiers: number
     }
 
+type BrowserClientMessage =
+  | BrowserInputEvent
+  | { type: "resize"; width: number; height: number }
+  | { type: "config"; maxFps: number }
+
 export interface ViewportPoint {
   x: number
   y: number
 }
 
 const RETRY_DELAY_MS = 3_000
+const RESIZE_DEBOUNCE_MS = 250
+/** The server's frame-rate ceiling; a backgrounded tab drops to a trickle. */
+const LIVE_FPS = 10
+const BACKGROUND_FPS = 1
 /** Capacity and server-side failures are worth one more try; access changes are not. */
 const RETRYABLE_CLOSE_CODES = new Set([1011, 1013])
+
+function usePageVisible(): boolean {
+  const [visible, setVisible] = useState(
+    () => typeof document === "undefined" || !document.hidden
+  )
+  useEffect(() => {
+    const update = () => setVisible(!document.hidden)
+    document.addEventListener("visibilitychange", update)
+    return () => document.removeEventListener("visibilitychange", update)
+  }, [])
+  return visible
+}
 
 export function parseBrowserFrame(raw: string): BrowserFrame | null {
   let message: unknown
@@ -140,7 +162,12 @@ async function decodeFrame(data: string): Promise<ImageBitmap> {
  * each is acknowledged only after it is drawn, so a slow viewer gets the
  * current page rather than a backlog.
  */
-export function useBrowserLive(threadId: string, sessionId: string | null) {
+export function useBrowserLive(
+  threadId: string,
+  sessionId: string | null,
+  panelViewport: ViewportSize | null
+) {
+  const pageVisible = usePageVisible()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [status, setStatus] = useState<BrowserLiveStatus>("idle")
   const [role, setRole] = useState<BrowserLiveConnection["role"] | null>(null)
@@ -184,12 +211,32 @@ export function useBrowserLive(threadId: string, sessionId: string | null) {
     },
     []
   )
-  /** Sends one input event; the server forwards it only while this viewer holds the lease. */
-  const sendInput = useCallback((event: BrowserInputEvent) => {
+  const send = useCallback((message: BrowserClientMessage) => {
     const socket = socketRef.current
     if (socket?.readyState === WebSocket.OPEN)
-      socket.send(JSON.stringify(event))
+      socket.send(JSON.stringify(message))
   }, [])
+  /** Sends one input event; the server forwards it only while this viewer holds the lease. */
+  const sendInput = useCallback(
+    (event: BrowserInputEvent) => send(event),
+    [send]
+  )
+
+  const width = panelViewport?.width
+  const height = panelViewport?.height
+  useEffect(() => {
+    if (status !== "live") return
+    send({ type: "config", maxFps: pageVisible ? LIVE_FPS : BACKGROUND_FPS })
+  }, [status, pageVisible, send])
+  useEffect(() => {
+    if (status !== "live" || role === "view" || !pageVisible) return
+    if (!width || !height) return
+    const timer = setTimeout(
+      () => send({ type: "resize", width, height }),
+      RESIZE_DEBOUNCE_MS
+    )
+    return () => clearTimeout(timer)
+  }, [status, role, pageVisible, width, height, send])
 
   useEffect(() => {
     if (!sessionId) return

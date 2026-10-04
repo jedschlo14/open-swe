@@ -15,6 +15,7 @@ import {
   Square,
   Timer,
 } from "lucide-react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -27,6 +28,10 @@ import type {
   BrowserSessionView,
   BrowserStopReason,
 } from "@/features/agents/lib/api"
+import {
+  fitViewport,
+  type ViewportSize,
+} from "@/features/agents/components/browser/browserViewport"
 import { useBrowserLive } from "@/features/agents/components/browser/useBrowserLive"
 import { cn } from "@/lib/utils"
 
@@ -80,6 +85,32 @@ function formatExpiry(expiresAt: string): string {
     hour: "numeric",
     minute: "2-digit",
   })
+}
+
+const CANVAS_BORDER_PX = 2
+
+/** The content size of the element a callback ref is attached to, kept current as it resizes. */
+function useElementSize() {
+  const [size, setSize] = useState<ViewportSize | null>(null)
+  const observer = useRef<ResizeObserver | null>(null)
+  const ref = useCallback((node: HTMLDivElement | null) => {
+    observer.current?.disconnect()
+    observer.current = null
+    if (!node) return
+    const next = new ResizeObserver(([entry]) => {
+      if (!entry) return
+      const width = Math.floor(entry.contentRect.width) - CANVAS_BORDER_PX
+      const height = Math.floor(entry.contentRect.height) - CANVAS_BORDER_PX
+      setSize((current) =>
+        current?.width === width && current.height === height
+          ? current
+          : { width, height }
+      )
+    })
+    next.observe(node)
+    observer.current = next
+  }, [])
+  return [size, ref] as const
 }
 
 function Centered(props: { children: ReactNode }) {
@@ -146,6 +177,11 @@ export function BrowserPanel(props: { threadId: string }) {
     queryFn: () => agentsApi.getBrowser(threadId),
     refetchInterval: STATUS_POLL_MS,
   })
+  const [stageSize, stageRef] = useElementSize()
+  const viewport = useMemo(
+    () => (stageSize ? fitViewport(stageSize) : null),
+    [stageSize]
+  )
   const {
     attachCanvas,
     pointAt,
@@ -155,7 +191,8 @@ export function BrowserPanel(props: { threadId: string }) {
     role,
   } = useBrowserLive(
     threadId,
-    status.data?.state === "ready" ? status.data.sessionId : null
+    status.data?.state === "ready" ? status.data.sessionId : null,
+    viewport
   )
   const canControl = role !== "view"
 
@@ -368,7 +405,10 @@ export function BrowserPanel(props: { threadId: string }) {
           }
         />
       ) : null}
-      <div className="group relative flex min-h-0 flex-1 items-center justify-center bg-muted/30 p-3">
+      <div
+        ref={stageRef}
+        className="group relative flex min-h-0 flex-1 items-center justify-center bg-muted/30 p-3"
+      >
         <canvas
           ref={attachCanvas}
           aria-label={

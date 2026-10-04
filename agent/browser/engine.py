@@ -39,6 +39,10 @@ MAX_OUTPUT_CHARS = 40_000
 DAEMON_IDLE_GRACE_MS = 10 * 60 * 1000
 VIEWPORT_WIDTH = 1440
 VIEWPORT_HEIGHT = 900
+# A viewer's panel decides the page size within these bounds, so frames stay under the live
+# view's message cap and the page never collapses below a usable layout.
+MIN_VIEWPORT = (800, 480)
+MAX_VIEWPORT = (1920, 1200)
 # Rendered at twice the viewport so the live view stays sharp on high-density (4K) displays.
 # Chrome's screencast only reaches the window's real scale factor, so the emulated one set by
 # `set viewport` is not enough: the stream stays at CSS size unless Chrome itself is launched at 2x.
@@ -137,8 +141,8 @@ def _env(session: BrowserSession) -> dict[str, str]:
         "AGENT_BROWSER_ARGS": f"--force-device-scale-factor={DEVICE_SCALE_FACTOR}",
         "AGENT_BROWSER_STREAM_QUALITY": "80",
         # Both caps must be set, or the stream downscales frames to the viewport's CSS size.
-        "AGENT_BROWSER_STREAM_MAX_WIDTH": str(VIEWPORT_WIDTH * DEVICE_SCALE_FACTOR),
-        "AGENT_BROWSER_STREAM_MAX_HEIGHT": str(VIEWPORT_HEIGHT * DEVICE_SCALE_FACTOR),
+        "AGENT_BROWSER_STREAM_MAX_WIDTH": str(MAX_VIEWPORT[0] * DEVICE_SCALE_FACTOR),
+        "AGENT_BROWSER_STREAM_MAX_HEIGHT": str(MAX_VIEWPORT[1] * DEVICE_SCALE_FACTOR),
     }
 
 
@@ -261,11 +265,7 @@ async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int:
     await run_command(sandbox, session, ["get", "url"], timeout=_LAUNCH_TIMEOUT_SECONDS)
     # Without an explicit viewport the page is shorter than the size the stream reports,
     # so frames are stretched and live-view clicks land below the pointer.
-    await run_command(
-        sandbox,
-        session,
-        ["set", "viewport", str(VIEWPORT_WIDTH), str(VIEWPORT_HEIGHT), str(DEVICE_SCALE_FACTOR)],
-    )
+    await set_viewport(sandbox, session, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
     port = _stream_port(await run_command(sandbox, session, ["stream", "status"]))
     if port is None:
         port = _stream_port(await run_command(sandbox, session, ["stream", "enable"]))
@@ -276,6 +276,25 @@ async def launch(sandbox: AsyncSandbox, session: BrowserSession) -> int:
     if not forwarded.isdigit():
         raise EngineCommandError("the stream forward did not report a port")
     return int(forwarded)
+
+
+def clamp_viewport(width: int, height: int) -> tuple[int, int]:
+    """``width`` by ``height`` limited to the sizes the browser supports."""
+    return (
+        min(max(width, MIN_VIEWPORT[0]), MAX_VIEWPORT[0]),
+        min(max(height, MIN_VIEWPORT[1]), MAX_VIEWPORT[1]),
+    )
+
+
+async def set_viewport(
+    sandbox: AsyncSandbox, session: BrowserSession, width: int, height: int
+) -> None:
+    """Resize the page; the stream follows, and its frames report the new size."""
+    await run_command(
+        sandbox,
+        session,
+        ["set", "viewport", str(width), str(height), str(DEVICE_SCALE_FACTOR)],
+    )
 
 
 async def element_label(
