@@ -1,8 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { toast } from "sonner"
 
 import { agentsApi } from "@/features/agents/lib/api"
 import type { ViewportSize } from "@/features/agents/components/browser/browserViewport"
 import type { BrowserLiveConnection } from "@/features/agents/lib/api"
+import {
+  cursorStyle,
+  isRecord,
+  parsePage,
+  parseScreen,
+  type BrowserGeometry,
+  type BrowserLiveRecord,
+  type BrowserPage,
+} from "@/features/agents/components/browser/browserMessages"
 
 export type BrowserLiveStatus =
   | "idle"
@@ -10,279 +20,251 @@ export type BrowserLiveStatus =
   | "live"
   | "ended"
   | "error"
+  | "unsupported"
 
-interface BrowserFrame {
-  type: "frame"
-  seq: number
-  data: string
-  metadata: { deviceWidth: number; deviceHeight: number }
-}
-
-const BROWSER_CURSORS = [
-  "auto",
-  "default",
-  "none",
-  "context-menu",
-  "help",
-  "pointer",
-  "progress",
-  "wait",
-  "cell",
-  "crosshair",
-  "text",
-  "vertical-text",
-  "alias",
-  "copy",
-  "move",
-  "no-drop",
-  "not-allowed",
-  "grab",
-  "grabbing",
-  "all-scroll",
-  "col-resize",
-  "row-resize",
-  "n-resize",
-  "e-resize",
-  "s-resize",
-  "w-resize",
-  "ne-resize",
-  "nw-resize",
-  "se-resize",
-  "sw-resize",
-  "ew-resize",
-  "ns-resize",
-  "nesw-resize",
-  "nwse-resize",
-  "zoom-in",
-  "zoom-out",
-] as const
-
-export type BrowserCursor = (typeof BROWSER_CURSORS)[number]
-
-function isBrowserCursor(value: string): value is BrowserCursor {
-  return (BROWSER_CURSORS as readonly string[]).includes(value)
-}
-
-export type BrowserInputEvent =
+export type BrowserClientMessage =
   | {
-      type: "input_mouse"
-      eventType: "mousePressed" | "mouseReleased" | "mouseMoved" | "mouseWheel"
+      type: "mouse"
+      action: "move" | "down" | "up" | "wheel"
       x: number
       y: number
-      button: "none" | "left" | "middle" | "right"
-      clickCount: number
-      deltaX?: number
-      deltaY?: number
-      modifiers: number
+      button?: number
+      dx?: number
+      dy?: number
     }
-  | {
-      type: "input_keyboard"
-      eventType: "keyDown" | "keyUp"
-      key: string
-      code: string
-      text?: string
-      modifiers: number
-    }
-
-type BrowserClientMessage =
-  | BrowserInputEvent
+  | { type: "key"; action: "down" | "up"; key: string; code: string }
   | { type: "resize"; width: number; height: number }
-  | { type: "config"; maxFps: number }
-
-export interface ViewportPoint {
-  x: number
-  y: number
-}
+  | {
+      type: "navigate"
+      action: "back" | "forward" | "reload" | "go"
+      url?: string
+    }
+  | { type: "copy" }
+  | { type: "paste"; text: string }
+  | {
+      type: "signal"
+      event: "request" | "answer" | "candidate" | "restart"
+      sdp?: string
+      candidate?: {
+        candidate: string
+        sdpMid: string | null
+        sdpMLineIndex: number | null
+        usernameFragment: string | null
+      }
+    }
 
 const RETRY_DELAY_MS = 3_000
-const RESIZE_DEBOUNCE_MS = 250
-/** The server's frame-rate ceiling; a backgrounded tab drops to a trickle. */
-const LIVE_FPS = 10
-const BACKGROUND_FPS = 1
+const RESIZE_DEBOUNCE_MS = 120
+const HIDDEN_DISCONNECT_MS = 20_000
+const ICE_FAILURE_MS = 8_000
 /** Capacity and server-side failures are worth one more try; access changes are not. */
 const RETRYABLE_CLOSE_CODES = new Set([1011, 1013])
 
-function usePageVisible(): boolean {
-  const [visible, setVisible] = useState(
-    () => typeof document === "undefined" || !document.hidden
-  )
+function usePageHiddenFor(delayMs: number): boolean {
+  const [suspended, setSuspended] = useState(false)
   useEffect(() => {
-    const update = () => setVisible(!document.hidden)
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const update = () => {
+      if (timer) clearTimeout(timer)
+      timer = null
+      if (document.hidden) {
+        timer = setTimeout(() => setSuspended(true), delayMs)
+      } else {
+        setSuspended(false)
+      }
+    }
     document.addEventListener("visibilitychange", update)
-    return () => document.removeEventListener("visibilitychange", update)
-  }, [])
-  return visible
+    return () => {
+      if (timer) clearTimeout(timer)
+      document.removeEventListener("visibilitychange", update)
+    }
+  }, [delayMs])
+  return suspended
 }
 
-export function parseBrowserFrame(raw: string): BrowserFrame | null {
-  let message: unknown
+async function writeClipboard(text: string) {
   try {
-    message = JSON.parse(raw)
-  } catch {
-    return null
+    await navigator.clipboard.writeText(text)
+  } catch (error) {
+    console.debug("Couldn't copy the page's selection", error)
+    toast.error("Couldn't copy to your clipboard.")
   }
-  if (typeof message !== "object" || message === null) return null
-  const candidate = message as Partial<BrowserFrame>
-  if (
-    candidate.type !== "frame" ||
-    typeof candidate.seq !== "number" ||
-    typeof candidate.data !== "string" ||
-    typeof candidate.metadata?.deviceWidth !== "number" ||
-    typeof candidate.metadata.deviceHeight !== "number"
-  )
-    return null
-  return candidate as BrowserFrame
 }
 
-export function parseBrowserCursor(raw: string): BrowserCursor | null {
-  let message: unknown
-  try {
-    message = JSON.parse(raw)
-  } catch {
-    return null
-  }
-  if (typeof message !== "object" || message === null) return null
-  const candidate = message as { type?: unknown; cursor?: unknown }
-  if (
-    candidate.type !== "cursor" ||
-    typeof candidate.cursor !== "string" ||
-    !isBrowserCursor(candidate.cursor)
-  )
-    return null
-  return candidate.cursor
-}
-
-async function decodeFrame(data: string): Promise<ImageBitmap> {
-  const response = await fetch(`data:image/jpeg;base64,${data}`)
-  return createImageBitmap(await response.blob())
+function iceServersOf(value: unknown): RTCIceServer[] {
+  if (!Array.isArray(value)) return []
+  return value.filter(isRecord).flatMap((server) => {
+    const { urls, username, credential } = server
+    if (
+      !Array.isArray(urls) ||
+      !urls.every((url) => typeof url === "string") ||
+      typeof username !== "string" ||
+      typeof credential !== "string"
+    )
+      return []
+    return [{ urls, username, credential }]
+  })
 }
 
 /**
- * Streams a thread browser's viewport onto a canvas. Frames use ack pacing:
- * each is acknowledged on arrival so the next one travels while this one is
- * decoded, and a frame still waiting when a newer one lands is dropped, so a
- * slow viewer gets the current page rather than a backlog.
+ * Plays a thread browser's neko stream: WebRTC video into a `<video>` element, the
+ * cursor image from its data channel, and the controller's input back over the
+ * dashboard socket. The server decides who may send input; this hook only
+ * transports it. Media is relayed through TURN only, so the sandbox never learns
+ * the viewer's address.
  */
 export function useBrowserLive(
   threadId: string,
   sessionId: string | null,
   panelViewport: ViewportSize | null
 ) {
-  const pageVisible = usePageVisible()
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const suspended = usePageHiddenFor(HIDDEN_DISCONNECT_MS)
+  const unsupported = typeof RTCPeerConnection === "undefined"
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
   const [status, setStatus] = useState<BrowserLiveStatus>("idle")
   const [role, setRole] = useState<BrowserLiveConnection["role"] | null>(null)
-  const [cursor, setCursor] = useState<BrowserCursor>("default")
+  const [cursor, setCursor] = useState("default")
+  const [page, setPage] = useState<BrowserPage | null>(null)
+  const [geometry, setGeometry] = useState<BrowserGeometry | null>(null)
+  const [attempt, setAttempt] = useState(0)
 
   const socketRef = useRef<WebSocket | null>(null)
-  const viewportRef = useRef<{ width: number; height: number } | null>(null)
-  const attachCanvas = useCallback((node: HTMLCanvasElement | null) => {
-    canvasRef.current = node
+  const geometryRef = useRef<BrowserGeometry | null>(null)
+  const attachVideo = useCallback((node: HTMLVideoElement | null) => {
+    videoRef.current = node
+    if (node && streamRef.current) node.srcObject = streamRef.current
   }, [])
-  /**
-   * Maps a pointer position to the browser's CSS viewport. The canvas holds
-   * device pixels and is letterboxed by object-contain, so neither its pixel
-   * size nor its element box matches the page's coordinate space.
-   */
-  const pointAt = useCallback(
-    (clientX: number, clientY: number): ViewportPoint | null => {
-      const canvas = canvasRef.current
-      const viewport = viewportRef.current
-      if (!canvas || !viewport || !canvas.width || !canvas.height) return null
-      const rect = canvas.getBoundingClientRect()
-      const scale = Math.min(
-        canvas.clientWidth / canvas.width,
-        canvas.clientHeight / canvas.height
-      )
-      if (!(scale > 0)) return null
-      const left =
-        rect.left +
-        canvas.clientLeft +
-        (canvas.clientWidth - canvas.width * scale) / 2
-      const top =
-        rect.top +
-        canvas.clientTop +
-        (canvas.clientHeight - canvas.height * scale) / 2
-      const x = ((clientX - left) / (canvas.width * scale)) * viewport.width
-      const y = ((clientY - top) / (canvas.height * scale)) * viewport.height
-      return {
-        x: Math.round(Math.min(Math.max(x, 0), viewport.width - 1)),
-        y: Math.round(Math.min(Math.max(y, 0), viewport.height - 1)),
-      }
-    },
-    []
-  )
   const send = useCallback((message: BrowserClientMessage) => {
     const socket = socketRef.current
     if (socket?.readyState === WebSocket.OPEN)
       socket.send(JSON.stringify(message))
   }, [])
-  /** Sends one input event; the server forwards it only while this viewer holds the lease. */
-  const sendInput = useCallback(
-    (event: BrowserInputEvent) => send(event),
-    [send]
-  )
 
   const width = panelViewport?.width
   const height = panelViewport?.height
   useEffect(() => {
-    if (status !== "live") return
-    send({ type: "config", maxFps: pageVisible ? LIVE_FPS : BACKGROUND_FPS })
-  }, [status, pageVisible, send])
-  useEffect(() => {
-    if (status !== "live" || role === "view" || !pageVisible) return
-    if (!width || !height) return
+    if (status !== "live" || role === "view" || !width || !height) return
     const timer = setTimeout(
       () => send({ type: "resize", width, height }),
       RESIZE_DEBOUNCE_MS
     )
     return () => clearTimeout(timer)
-  }, [status, role, pageVisible, width, height, send])
+  }, [status, role, width, height, send])
 
   useEffect(() => {
-    if (!sessionId) return
+    if (!sessionId || suspended) return
+    if (unsupported) return
     let disposed = false
     let socket: WebSocket | null = null
+    let peer: RTCPeerConnection | null = null
     let retry: ReturnType<typeof setTimeout> | null = null
-    let drawing = false
-    let waiting: BrowserFrame | null = null
+    let iceTimer: ReturnType<typeof setTimeout> | null = null
+    let waiting: RTCIceCandidateInit[] = []
 
-    const paint = async (frame: BrowserFrame) => {
-      const canvas = canvasRef.current
-      if (!canvas) return
-      const bitmap = await decodeFrame(frame.data)
-      // Frames arrive at device pixels, above the viewport's CSS size, so the
-      // canvas keeps them at full resolution and CSS scales it to the panel.
-      if (canvas.width !== bitmap.width) canvas.width = bitmap.width
-      if (canvas.height !== bitmap.height) canvas.height = bitmap.height
-      canvas.getContext("2d")?.drawImage(bitmap, 0, 0)
-      viewportRef.current = {
-        width: frame.metadata.deviceWidth,
-        height: frame.metadata.deviceHeight,
-      }
-      bitmap.close()
+    const reconnect = () => {
+      if (!disposed) setAttempt((count) => count + 1)
     }
 
-    const draw = async (frame: BrowserFrame, ws: WebSocket) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "ack", seq: frame.seq }))
+    const startPeer = async (message: BrowserLiveRecord) => {
+      if (typeof message.sdp !== "string") return
+      peer?.close()
+      const connection = new RTCPeerConnection({
+        iceServers: iceServersOf(message.iceServers),
+        iceTransportPolicy: message.relayOnly === true ? "relay" : "all",
+      })
+      peer = connection
+      connection.onicecandidate = (event) => {
+        if (!event.candidate) return
+        const { candidate, sdpMid, sdpMLineIndex, usernameFragment } =
+          event.candidate
+        send({
+          type: "signal",
+          event: "candidate",
+          candidate: { candidate, sdpMid, sdpMLineIndex, usernameFragment },
+        })
       }
-      if (drawing) {
-        waiting = frame
-        return
+      connection.ontrack = (event) => {
+        if (event.track.kind !== "video") return
+        const stream = event.streams[0] ?? new MediaStream([event.track])
+        streamRef.current = stream
+        if (videoRef.current) videoRef.current.srcObject = stream
       }
-      drawing = true
-      let next: BrowserFrame | null = frame
-      while (next && !disposed) {
-        waiting = null
-        try {
-          await paint(next)
-        } catch (error) {
-          console.debug("Skipped a browser frame that failed to decode", error)
+      connection.ondatachannel = (event) => {
+        event.channel.binaryType = "arraybuffer"
+        event.channel.onmessage = (frame) => {
+          if (!(frame.data instanceof ArrayBuffer)) return
+          const scale = geometryRef.current?.scale ?? 1
+          const next = cursorStyle(frame.data, scale)
+          if (next) setCursor(next)
         }
-        next = waiting
       }
-      drawing = false
+      connection.onconnectionstatechange = () => {
+        if (disposed || peer !== connection) return
+        if (connection.connectionState === "connected") {
+          if (iceTimer) clearTimeout(iceTimer)
+          iceTimer = null
+          setStatus("live")
+        } else if (connection.connectionState === "failed") {
+          setStatus("error")
+        }
+      }
+      if (iceTimer) clearTimeout(iceTimer)
+      iceTimer = setTimeout(() => {
+        if (!disposed && connection.connectionState !== "connected")
+          setStatus("error")
+      }, ICE_FAILURE_MS)
+      await connection.setRemoteDescription({ type: "offer", sdp: message.sdp })
+      for (const early of waiting) await connection.addIceCandidate(early)
+      waiting = []
+      const answer = await connection.createAnswer()
+      await connection.setLocalDescription(answer)
+      send({ type: "signal", event: "answer", sdp: answer.sdp ?? "" })
+    }
+
+    const addCandidate = async (message: BrowserLiveRecord) => {
+      const candidate = message.candidate
+      if (!isRecord(candidate) || typeof candidate.candidate !== "string")
+        return
+      const init: RTCIceCandidateInit = {
+        candidate: candidate.candidate,
+        sdpMid: typeof candidate.sdpMid === "string" ? candidate.sdpMid : null,
+        sdpMLineIndex:
+          typeof candidate.sdpMLineIndex === "number"
+            ? candidate.sdpMLineIndex
+            : null,
+      }
+      if (peer?.remoteDescription) await peer.addIceCandidate(init)
+      else waiting.push(init)
+    }
+
+    const handleMessage = async (message: BrowserLiveRecord) => {
+      switch (message.type) {
+        case "signal":
+          if (message.event === "provide") await startPeer(message)
+          else if (message.event === "candidate") await addCandidate(message)
+          return
+        case "screen": {
+          const next = parseScreen(message)
+          if (next) {
+            geometryRef.current = next
+            setGeometry(next)
+          }
+          return
+        }
+        case "page": {
+          const next = parsePage(message)
+          if (next) setPage(next)
+          return
+        }
+        case "clipboard":
+          if (typeof message.text === "string")
+            void writeClipboard(message.text)
+          return
+        case "notice":
+          if (typeof message.message === "string") toast.error(message.message)
+          return
+      }
     }
 
     const connect = () => {
@@ -301,17 +283,20 @@ export function useBrowserLive(
           ws.onopen = () => {
             if (disposed) return
             setCursor("default")
-            setStatus("live")
+            send({ type: "signal", event: "request" })
           }
           ws.onmessage = (event) => {
             if (disposed || typeof event.data !== "string") return
-            const frame = parseBrowserFrame(event.data)
-            if (frame) {
-              void draw(frame, ws)
-              return
+            try {
+              const message: unknown = JSON.parse(event.data)
+              if (isRecord(message))
+                handleMessage(message).catch((error: unknown) => {
+                  console.debug("The live view's stream failed", error)
+                  reconnect()
+                })
+            } catch (error) {
+              console.debug("Ignored an unreadable live view message", error)
             }
-            const next = parseBrowserCursor(event.data)
-            if (next) setCursor(next)
           }
           ws.onclose = (event) => {
             if (disposed) return
@@ -332,17 +317,22 @@ export function useBrowserLive(
     return () => {
       disposed = true
       if (retry) clearTimeout(retry)
+      if (iceTimer) clearTimeout(iceTimer)
       socketRef.current = null
       socket?.close()
+      peer?.close()
+      streamRef.current = null
+      if (videoRef.current) videoRef.current.srcObject = null
     }
-  }, [threadId, sessionId])
+  }, [threadId, sessionId, suspended, unsupported, attempt, send])
 
   return {
-    attachCanvas,
-    pointAt,
-    sendInput,
+    attachVideo,
+    send,
     cursor,
-    status: sessionId ? status : "idle",
+    page: sessionId ? page : null,
+    geometry: sessionId ? geometry : null,
+    status: !sessionId ? "idle" : unsupported ? "unsupported" : status,
     role: sessionId ? role : null,
   }
 }
