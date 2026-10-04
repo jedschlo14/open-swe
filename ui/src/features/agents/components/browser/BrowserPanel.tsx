@@ -36,6 +36,7 @@ import { useBrowserLive } from "@/features/agents/components/browser/useBrowserL
 import { cn } from "@/lib/utils"
 
 const STATUS_POLL_MS = 5_000
+const TRANSITION_POLL_MS = 750
 
 const FAILURE_COPY: Record<BrowserFailureReason, string> = {
   sandbox_lost: "The browser's sandbox went away, so its page is gone.",
@@ -143,6 +144,7 @@ function ConfirmationCard(props: {
       {pending.status === "pending" && props.canDecide ? (
         <div className="mt-2 flex gap-2">
           <Button
+            className="cursor-pointer"
             size="sm"
             disabled={props.deciding}
             onClick={() => props.onDecide(true)}
@@ -150,6 +152,7 @@ function ConfirmationCard(props: {
             Approve once
           </Button>
           <Button
+            className="cursor-pointer"
             size="sm"
             variant="outline"
             disabled={props.deciding}
@@ -175,7 +178,14 @@ export function BrowserPanel(props: { threadId: string }) {
   const status = useQuery({
     queryKey: browserQueryKey(threadId),
     queryFn: () => agentsApi.getBrowser(threadId),
-    refetchInterval: STATUS_POLL_MS,
+    refetchInterval: (query) => {
+      const current = query.state.data
+      const changing =
+        current?.state === "starting" ||
+        current?.state === "stopping" ||
+        (current?.handoff != null && current.handoff !== "none")
+      return changing ? TRANSITION_POLL_MS : STATUS_POLL_MS
+    },
   })
   const [stageSize, stageRef] = useElementSize()
   const viewport = useMemo(
@@ -279,6 +289,7 @@ export function BrowserPanel(props: { threadId: string }) {
           to watch it work.
         </p>
         <Button
+          className="cursor-pointer"
           size="sm"
           disabled={action.isPending}
           onClick={() => action.mutate("start")}
@@ -345,28 +356,39 @@ export function BrowserPanel(props: { threadId: string }) {
         {canControl && view.handoff === "none" ? (
           view.controller === "agent" ? (
             <Button
+              className="cursor-pointer"
               size="sm"
               variant="outline"
               disabled={action.isPending}
               onClick={() => action.mutate("takeover")}
             >
-              <Hand />
+              {action.isPending && action.variables === "takeover" ? (
+                <Spinner />
+              ) : (
+                <Hand />
+              )}
               Take control
             </Button>
           ) : (
             <Button
+              className="cursor-pointer"
               size="sm"
               variant="outline"
               disabled={action.isPending}
               onClick={() => action.mutate("handback")}
             >
-              <Bot />
+              {action.isPending && action.variables === "handback" ? (
+                <Spinner />
+              ) : (
+                <Bot />
+              )}
               Hand back
             </Button>
           )
         ) : null}
         {canControl ? (
           <Button
+            className="cursor-pointer"
             size="sm"
             variant="ghost"
             disabled={action.isPending}
@@ -385,6 +407,7 @@ export function BrowserPanel(props: { threadId: string }) {
           </span>
           {canControl ? (
             <Button
+              className="cursor-pointer"
               size="sm"
               variant="outline"
               disabled={action.isPending}
@@ -477,6 +500,7 @@ export function BrowserPanel(props: { threadId: string }) {
               </div>
               {canTakeOver ? (
                 <Button
+                  className="cursor-pointer"
                   size="sm"
                   disabled={action.isPending}
                   onClick={() => action.mutate("takeover")}
