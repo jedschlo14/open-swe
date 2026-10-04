@@ -5,7 +5,7 @@ copies frames to the viewer, so neither the provider URL nor DevTools ever
 reaches the client. Access is checked on connect and rechecked while the view
 is open; the connection closes when the viewer loses access or the session it
 was opened for ends. Input passes only for a viewer who holds the lease, checked
-again for every press, release, and key.
+again for every press, release, and key (thread access at most once a second).
 """
 
 import asyncio
@@ -39,6 +39,8 @@ _MOUSE_BUTTONS = frozenset({"none", "left", "middle", "right"})
 # Pointer moves arrive by the dozen per second; they reuse a check this recent.
 _MOVE_CHECK_SECONDS = 2.0
 _ACTIVITY_EVERY_SECONDS = 30.0
+# Thread access is fetched from another service; the lease is read for every action regardless.
+_ACCESS_CHECK_SECONDS = 1.0
 
 type Authorizer = Callable[[], Awaitable[BrowserTicketRole | None]]
 
@@ -128,6 +130,8 @@ class _ControlGate:
         self._login = login
         self._authorize = authorize
         self._checked_at = float("-inf")
+        self._access_checked_at = float("-inf")
+        self._may_control = False
         self._allowed = False
         self._active_at = float("-inf")
 
@@ -135,12 +139,15 @@ class _ControlGate:
         now = time.monotonic()
         if discrete or now - self._checked_at >= _MOVE_CHECK_SECONDS:
             current = await store.latest(self._session.thread_id)
-            self._allowed = (
+            holds_lease = (
                 current is not None
                 and current.session_id == self._session.session_id
                 and current.user_controls(self._login)
-                and await self._authorize() == "control"
             )
+            if holds_lease and now - self._access_checked_at >= _ACCESS_CHECK_SECONDS:
+                self._may_control = await self._authorize() == "control"
+                self._access_checked_at = now
+            self._allowed = holds_lease and self._may_control
             self._checked_at = now
         if self._allowed and discrete and now - self._active_at >= _ACTIVITY_EVERY_SECONDS:
             self._active_at = now

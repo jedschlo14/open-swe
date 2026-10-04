@@ -30,6 +30,7 @@ import { useBrowserLive } from "@/features/agents/components/browser/useBrowserL
 import { cn } from "@/lib/utils"
 
 const STATUS_POLL_MS = 5_000
+const TRANSITION_POLL_MS = 750
 
 const FAILURE_COPY: Record<BrowserFailureReason, string> = {
   sandbox_lost: "The browser's sandbox went away, so its page is gone.",
@@ -145,7 +146,14 @@ export function BrowserPanel(props: { threadId: string }) {
   const status = useQuery({
     queryKey: browserQueryKey(threadId),
     queryFn: () => agentsApi.getBrowser(threadId),
-    refetchInterval: STATUS_POLL_MS,
+    refetchInterval: (query) => {
+      const current = query.state.data
+      const changing =
+        current?.state === "starting" ||
+        current?.state === "stopping" ||
+        (current?.handoff != null && current.handoff !== "none")
+      return changing ? TRANSITION_POLL_MS : STATUS_POLL_MS
+    },
   })
   const {
     attachCanvas,
@@ -307,22 +315,32 @@ export function BrowserPanel(props: { threadId: string }) {
         {canControl && view.handoff === "none" ? (
           view.controller === "agent" ? (
             <Button
+              className="cursor-pointer"
               size="sm"
               variant="outline"
               disabled={action.isPending}
               onClick={() => action.mutate("takeover")}
             >
-              <Hand />
+              {action.isPending && action.variables === "takeover" ? (
+                <Spinner />
+              ) : (
+                <Hand />
+              )}
               Take control
             </Button>
           ) : (
             <Button
+              className="cursor-pointer"
               size="sm"
               variant="outline"
               disabled={action.isPending}
               onClick={() => action.mutate("handback")}
             >
-              <Bot />
+              {action.isPending && action.variables === "handback" ? (
+                <Spinner />
+              ) : (
+                <Bot />
+              )}
               Hand back
             </Button>
           )

@@ -69,8 +69,11 @@ async def _page(session: BrowserSession) -> tuple[str | None, str | None]:
         return None, None
     try:
         async with engine.connected(session.sandbox_id) as sandbox:
-            url = _text(await engine.run_command(sandbox, session, ["get", "url"]), "url")
-            title = _text(await engine.run_command(sandbox, session, ["get", "title"]), "title")
+            url_data, title_data = await asyncio.gather(
+                engine.run_command(sandbox, session, ["get", "url"]),
+                engine.run_command(sandbox, session, ["get", "title"]),
+            )
+            url, title = _text(url_data, "url"), _text(title_data, "title")
     except engine.EngineCommandError, engine.SandboxLostError:
         logger.warning(
             "Could not read the page for the handback notice",
