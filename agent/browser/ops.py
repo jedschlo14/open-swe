@@ -55,6 +55,39 @@ class FillOp(_Op):
     text: str = Field(max_length=10_000)
 
 
+def _no_leading_dash(value: str | None) -> str | None:
+    if value is not None and value.startswith("-"):
+        raise ValueError("a locator cannot start with a dash")
+    return value
+
+
+class FindOp(_Op):
+    """Click or fill an element found by what it shows, so no snapshot or ref is needed."""
+
+    action: Literal["find"] = "find"
+    by: Literal["role", "text", "label", "placeholder"]
+    value: str = Field(
+        min_length=1,
+        max_length=200,
+        description="The role (e.g. button, textbox), or the visible text, label or placeholder.",
+    )
+    name: str | None = Field(
+        default=None, max_length=200, description="With `by: role`, the accessible name to match."
+    )
+    do: Literal["click", "fill"] = "click"
+    text: str | None = Field(default=None, max_length=10_000, description="What `fill` types.")
+
+    @model_validator(mode="after")
+    def _consistent(self) -> FindOp:
+        _no_leading_dash(self.value)
+        _no_leading_dash(self.name)
+        if self.name is not None and self.by != "role":
+            raise ValueError("name only applies with by=role")
+        if (self.do == "fill") != (self.text is not None):
+            raise ValueError("fill needs text, and click takes none")
+        return self
+
+
 class SelectOp(_Op):
     action: Literal["select"] = "select"
     ref: Ref
@@ -105,7 +138,29 @@ class RecordStopOp(_Op):
 
 
 ActOp = Annotated[
-    ClickOp | FillOp | SelectOp | PressOp | ScrollOp | WaitOp | BackOp | ReloadOp | DialogOp,
+    ClickOp
+    | FillOp
+    | FindOp
+    | SelectOp
+    | PressOp
+    | ScrollOp
+    | WaitOp
+    | BackOp
+    | ReloadOp
+    | DialogOp,
+    Field(discriminator="action"),
+]
+FlowStep = Annotated[
+    NavigateOp
+    | ClickOp
+    | FillOp
+    | FindOp
+    | SelectOp
+    | PressOp
+    | ScrollOp
+    | WaitOp
+    | BackOp
+    | ReloadOp,
     Field(discriminator="action"),
 ]
 BrowserOp = Annotated[
@@ -113,6 +168,7 @@ BrowserOp = Annotated[
     | SnapshotOp
     | ClickOp
     | FillOp
+    | FindOp
     | SelectOp
     | PressOp
     | ScrollOp
@@ -148,6 +204,13 @@ def _argv(op: BrowserOp) -> list[str]:
             return ["click", f"@{ref_name(ref)}"]
         case FillOp(ref=ref, text=text):
             return ["fill", f"@{ref_name(ref)}", text]
+        case FindOp(by=by, value=value, name=name, do=do, text=text):
+            argv = ["find", by, value, do]
+            if text is not None:
+                argv.append(text)
+            if name is not None:
+                argv += ["--name", name]
+            return argv
         case SelectOp(ref=ref, values=values):
             return ["select", f"@{ref_name(ref)}", *values]
         case PressOp(key=key):

@@ -17,6 +17,7 @@ from agent.browser.ops import (
     BrowserOp,
     ClickOp,
     FillOp,
+    FindOp,
     NavigateOp,
     SelectOp,
     ref_name,
@@ -142,6 +143,11 @@ def action(
     """
     page = endpoint_of(page_url)
     external = page is not None and not page.loopback
+    if isinstance(op, FindOp):
+        found = f"{op.name or ''} {op.value}"
+        if external and op.do == "click" and _SENSITIVE_WORDS.search(found):
+            return Confirm(reason=f'clicking "{found.strip()[:80]}"')
+        return Allow()
     if not isinstance(op, ClickOp):
         if isinstance(op, FillOp | SelectOp) and ref_name(op.ref) not in refs:
             return Refuse(reason=f"{op.ref} is not in the latest snapshot; take a new snapshot.")

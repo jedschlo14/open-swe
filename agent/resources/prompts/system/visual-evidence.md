@@ -15,4 +15,4 @@ Skip this only when the change has no visible effect (backend, tests, docs, conf
 
 ### Recordings
 
-Add a short recording only when motion is the evidence (a transition, an animation, a multi-step flow) and a still pair would not show it. It supplements the before/after screenshots and never replaces them. Use `browser_record_start`, do the steps, `browser_record_stop` and check the returned frames, then `browser_publish_recording`. Put a returned video URL alone on its own line in the PR body; embed an animation's Markdown as it is.
+Add a short recording only when motion is the evidence (a transition, an animation, a multi-step flow) and a still pair would not show it. It supplements the before/after screenshots and never replaces them. Rehearse the flow once, then capture it with a single `browser_record` call (5 to 10 seconds, only the steps that show the point), check the returned frames, then `browser_publish_recording`. Make one clip per before/after, not several attempts. Never batch browser calls in parallel. Put a returned video URL alone on its own line in the PR body; embed an animation's Markdown as it is.

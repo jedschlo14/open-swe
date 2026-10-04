@@ -19,6 +19,7 @@ from agent.browser.broker import BrowserOutcome
 from agent.browser.evidence import Label
 from agent.browser.ops import (
     ActOp,
+    FlowStep,
     NavigateOp,
     RecordStartOp,
     RecordStopOp,
@@ -39,6 +40,7 @@ BROWSER_TOOL_NAMES = (
     "browser_act",
     "browser_screenshot",
     "browser_publish_screenshot",
+    "browser_record",
     "browser_record_start",
     "browser_record_stop",
     "browser_publish_recording",
@@ -84,6 +86,17 @@ class _NoArgs(BaseModel):
 class _PublishArgs(BaseModel):
     label: Label = Field(description="`before` or `after` for a comparison pair, else `other`.")
     caption: str = Field(max_length=120, description="Short alt text describing what it shows.")
+
+
+class _RecordArgs(BaseModel):
+    steps: list[FlowStep] = Field(
+        min_length=1,
+        max_length=12,
+        description="The page actions to record, run back to back in this order.",
+    )
+    pause_ms: int = Field(
+        default=600, ge=0, le=2_000, description="Pause after each step so the result is visible."
+    )
 
 
 class _PublishRecordingArgs(BaseModel):
@@ -185,9 +198,7 @@ async def browser_record_start() -> str:
     return _report(await broker.execute(thread_id, RecordStartOp(), workspace_slug=workspace))
 
 
-async def browser_record_stop() -> list[ContentBlock] | str:
-    thread_id, workspace = _context()
-    outcome = await broker.execute(thread_id, RecordStopOp(), workspace_slug=workspace)
+def _sheet_blocks(outcome: BrowserOutcome) -> list[ContentBlock] | str:
     if outcome.image_base64 is None:
         return _report(outcome)
     return [
@@ -198,6 +209,18 @@ async def browser_record_stop() -> list[ContentBlock] | str:
             "mime_type": outcome.image_mime_type or "image/jpeg",
         },
     ]
+
+
+async def browser_record_stop() -> list[ContentBlock] | str:
+    thread_id, workspace = _context()
+    return _sheet_blocks(await broker.execute(thread_id, RecordStopOp(), workspace_slug=workspace))
+
+
+async def browser_record(steps: list[FlowStep], pause_ms: int = 600) -> list[ContentBlock] | str:
+    thread_id, workspace = _context()
+    return _sheet_blocks(
+        await broker.record_flow(thread_id, steps, workspace_slug=workspace, pause_ms=pause_ms)
+    )
 
 
 async def _personal_token() -> str | None:
@@ -362,6 +385,12 @@ def browser_tools() -> list[BaseTool]:
             name="browser_publish_screenshot",
             description=prompt("tools/browser_publish_screenshot"),
             args_schema=_PublishArgs,
+        ),
+        StructuredTool.from_function(
+            coroutine=browser_record,
+            name="browser_record",
+            description=prompt("tools/browser_record"),
+            args_schema=_RecordArgs,
         ),
         StructuredTool.from_function(
             coroutine=browser_record_start,
