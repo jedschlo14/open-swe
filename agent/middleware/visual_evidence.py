@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import quote
 
 from langchain.agents.middleware.types import AgentState
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
@@ -20,6 +20,7 @@ from agent.prompts import prompt
 logger = logging.getLogger(__name__)
 
 _GUARDED_TOOL = "open_pull_request"
+_BROWSER_ATTEMPT_TOOL = "browser_navigate"
 _UI_SUFFIXES = (
     ".tsx",
     ".jsx",
@@ -41,8 +42,21 @@ def is_visual_file(path: str) -> bool:
     return path.lower().endswith(_UI_SUFFIXES) and _NON_VISUAL.search(path) is None
 
 
-def has_visual_evidence(body: str) -> bool:
-    return f"/blob/{EVIDENCE_BRANCH}/" in body or _OMITTED.search(body) is not None
+def has_screenshots(body: str) -> bool:
+    return f"/blob/{EVIDENCE_BRANCH}/" in body
+
+
+def states_omission(body: str) -> bool:
+    return _OMITTED.search(body) is not None
+
+
+def tried_browser(state: object) -> bool:
+    messages = state.get("messages") if isinstance(state, Mapping) else None
+    return any(
+        isinstance(message, AIMessage)
+        and any(call.get("name") == _BROWSER_ATTEMPT_TOOL for call in message.tool_calls)
+        for message in messages or ()
+    )
 
 
 async def _changed_files(owner: str, repo: str, base: str, head: str) -> list[str] | None:
@@ -72,7 +86,7 @@ async def _changed_files(owner: str, repo: str, base: str, head: str) -> list[st
 
 
 class VisualEvidenceMiddleware(OpenSWEMiddleware):
-    """Require before/after screenshots, or a stated reason, on PRs that change UI files."""
+    """Require before/after screenshots on UI PRs, or a stated reason after a browser attempt."""
 
     state_schema = AgentState
 
@@ -83,7 +97,10 @@ class VisualEvidenceMiddleware(OpenSWEMiddleware):
         args: Mapping[str, Any] = tool_call.get("args") or {}
         body, owner, repo = args.get("body"), args.get("owner"), args.get("repo")
         base, head = args.get("base"), args.get("head")
-        if not isinstance(body, str) or has_visual_evidence(body):
+        if not isinstance(body, str) or has_screenshots(body):
+            return None
+        omitted = states_omission(body)
+        if omitted and tried_browser(request.state):
             return None
         if not all(isinstance(value, str) and value for value in (owner, repo, base, head)):
             return None
@@ -107,7 +124,7 @@ class VisualEvidenceMiddleware(OpenSWEMiddleware):
                 {
                     "success": False,
                     "code": "visual_evidence_missing",
-                    "error": prompt("runs/missing-visual-evidence", files=listed),
+                    "error": prompt("runs/missing-visual-evidence", files=listed, omitted=omitted),
                 }
             ),
             tool_call_id=tool_call.get("id"),
